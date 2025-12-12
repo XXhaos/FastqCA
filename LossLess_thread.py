@@ -222,6 +222,7 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
 
 
 def merge_parts(output_path, total_blocks):
+    missing_parts = []
     tqdm.write(f"info：正在合并 {total_blocks} 个数据块...")
     with open(output_path, "wb") as final_file:
         for i in range(1, total_blocks + 1):
@@ -230,7 +231,11 @@ def merge_parts(output_path, total_blocks):
                 with open(part_path, "rb") as part_file:
                     shutil.copyfileobj(part_file, final_file)
                 os.remove(part_path)
+            else:
+                missing_parts.append(part_path)
         final_file.write(b"%eof")
+    if missing_parts:
+        raise FileNotFoundError(f"以下分块缺失，导致压缩结果不完整: {missing_parts}")
     tqdm.write("info：合并完成")
 
 
@@ -251,6 +256,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
     # 保持 maxtasksperchild=1 防止内存泄漏
     with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
         results = []
+        errors = []
         tqdm.write(f"info：正在读取 FASTQ 并分发任务...")
 
         with open(fastq_path, 'r') as file:
@@ -283,8 +289,11 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
             try:
                 res.get()
             except Exception as e:
-                tqdm.write(f"Task failed: {e}")
+                errors.append(e)
         pool.join()
+
+        if errors:
+            raise RuntimeError(f"检测到 {len(errors)} 个压缩块处理失败: {errors}")
 
     merge_parts(output_path, block_count)
     try:
@@ -468,6 +477,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
         # 使用mmap防止OOM
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write("info：开始解压 (安全长度模式)...")
+            eof_seen = False
 
             while True:
                 # 检查是否到达文件尾部标记
@@ -475,11 +485,14 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
                 # 只向后看一点点，避免搜索全文件
                 if mm.find(eof_tag, current_pos, current_pos + 100) != -1:
                     tqdm.write("info：检测到EOF，解压结束。")
+                    eof_seen = True
                     break
 
                 # 依次读取四个块，严格依赖长度头
                 id_regex_data = read_chunk_safe(mm, id_regex_tag)
-                if id_regex_data is None: break
+                if id_regex_data is None:
+                    tqdm.write("错误：未找到下一块的ID Regex数据，压缩文件可能缺失分块。")
+                    break
 
                 id_tokens_data = read_chunk_safe(mm, id_tokens_tag)
                 g_prime_data = read_chunk_safe(mm, base_tag)
@@ -497,6 +510,9 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
                 )
                 reconstruct_fastq(output_path, id_block, g_prime, quality)
                 block_count += 1
+
+            if not eof_seen:
+                raise RuntimeError("解压过程中未检测到EOF标记，压缩文件可能不完整或被截断。")
 
 
 def get_output_path(input_path, output_path):
