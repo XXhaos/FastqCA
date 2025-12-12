@@ -422,7 +422,7 @@ def reconstruct_base_and_quality(g_prime_img, quality_img):
     return bases, qualities
 
 
-def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img):
+def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False):
     records = []
     final_fastq_path = output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
 
@@ -438,26 +438,28 @@ def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img):
         record.letter_annotations["phred_quality"] = quality[i]
         records.append(record)
 
-    with open(final_fastq_path, 'a+') as output_handle:
+    # 首块使用写入模式覆盖旧文件，避免重复解压导致结果被追加
+    mode = 'w' if is_first_block else 'a'
+    with open(final_fastq_path, mode) as output_handle:
         SeqIO.write(records, output_handle, 'fastq')
 
 
 def read_chunk_safe(mmap_obj, tag):
-    """【核心修复】基于长度读取数据块，不依赖分隔符搜索"""
-    # 1. 查找Tag (双重确认，防止位移)
-    pos = mmap_obj.find(tag, mmap_obj.tell())
-    if pos == -1: return None
+    """严格按当前位置读取 tag + 长度 + 数据，避免搜索误匹配导致偏移"""
+    start_pos = mmap_obj.tell()
+    header = mmap_obj.read(len(tag))
+    if header != tag:
+        raise RuntimeError(f"解压时在偏移 {start_pos} 处未找到预期的标记 {tag!r}")
 
-    # 2. 跳过Tag
-    mmap_obj.seek(pos + len(tag))
-
-    # 3. 读取8字节长度
     size_bytes = mmap_obj.read(8)
-    if len(size_bytes) < 8: return None
+    if len(size_bytes) < 8:
+        raise RuntimeError("解压时无法读取长度字段，压缩文件可能已损坏")
     size = struct.unpack('<Q', size_bytes)[0]
 
-    # 4. 读取指定长度的数据
     data = mmap_obj.read(size)
+    if len(data) != size:
+        raise RuntimeError(
+            f"解压时数据长度不足：期望 {size} 字节，仅读取到 {len(data)} 字节")
     return data
 
 
@@ -477,30 +479,22 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
         # 使用mmap防止OOM
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write("info：开始解压 (安全长度模式)...")
-            eof_seen = False
 
             while True:
-                # 检查是否到达文件尾部标记
-                current_pos = mm.tell()
-                # 只向后看一点点，避免搜索全文件
-                if mm.find(eof_tag, current_pos, current_pos + 100) != -1:
+                # 如果后续仅剩EOF标记，则结束
+                remaining = mm.size() - mm.tell()
+                if remaining == len(eof_tag):
+                    tail = mm.read(len(eof_tag))
+                    if tail != eof_tag:
+                        raise RuntimeError("解压结束时未发现EOF标记，压缩文件可能损坏")
                     tqdm.write("info：检测到EOF，解压结束。")
-                    eof_seen = True
                     break
 
                 # 依次读取四个块，严格依赖长度头
                 id_regex_data = read_chunk_safe(mm, id_regex_tag)
-                if id_regex_data is None:
-                    tqdm.write("错误：未找到下一块的ID Regex数据，压缩文件可能缺失分块。")
-                    break
-
                 id_tokens_data = read_chunk_safe(mm, id_tokens_tag)
                 g_prime_data = read_chunk_safe(mm, base_tag)
                 quality_data = read_chunk_safe(mm, quality_tag)
-
-                if any(x is None for x in [id_tokens_data, g_prime_data, quality_data]):
-                    tqdm.write(f"错误：块 {block_count} 数据不完整")
-                    break
 
                 tqdm.write(f"正在处理块: {block_count}")
 
@@ -508,11 +502,8 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
                     output_path, lpaq8_path, id_regex_data, id_tokens_data,
                     g_prime_data, quality_data, save, block_count
                 )
-                reconstruct_fastq(output_path, id_block, g_prime, quality)
+                reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=(block_count == 1))
                 block_count += 1
-
-            if not eof_seen:
-                raise RuntimeError("解压过程中未检测到EOF标记，压缩文件可能不完整或被截断。")
 
 
 def get_output_path(input_path, output_path):
