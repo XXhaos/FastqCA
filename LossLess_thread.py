@@ -339,28 +339,30 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
             with open(os.path.join(front_compress_dir, f"chunk_{block_count}_id_tokens.txt"), "w") as f:
                 f.write("\n".join(id_tokens))
 
-        id_block = zip(id_tokens, id_regex)
+        # 确保 id_block 在 try 内完整生成
+        id_block = list(zip(id_tokens, id_regex))
 
         # 3. Quality
         quality_bytes = decompress_bytes(quality_data)
         with Image.open(io.BytesIO(quality_bytes)) as img:
             quality = img.copy()
         if save:
-            with open(os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'), "wb") as f:
+            with open(os.path.join(back_compress_dir, f"chunk_{block_count}_quality.lpaq8"), "wb") as f:
                 f.write(quality_data)
-            quality.save(os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
+            quality.save(os.path.join(front_compress_dir, f"chunk_{block_count}_quality.tiff"))
 
         # 4. G Prime
         g_prime_bytes = decompress_bytes(g_prime_data)
         with Image.open(io.BytesIO(g_prime_bytes)) as img:
             g_prime = img.copy()
         if save:
-            with open(os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'), "wb") as f:
+            with open(os.path.join(back_compress_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as f:
                 f.write(g_prime_data)
-            g_prime.save(os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
+            g_prime.save(os.path.join(front_compress_dir, f"chunk_{block_count}_base_g_prime.tiff"))
 
         return id_block, g_prime, quality
     except Exception as e:
+        # 明确捕获所有异常，便于定位块号
         raise RuntimeError(f"解压块 {block_count} 失败: {e}") from e
 
 
