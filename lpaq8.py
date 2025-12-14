@@ -9,24 +9,53 @@ from contextlib import contextmanager
 _LIB_NAME = "liblpaq8.so"
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _LIB_PATH = os.path.join(_MODULE_DIR, _LIB_NAME)
+_LOCK_PATH = os.path.join(_MODULE_DIR, "._liblpaq8_build.lock")
 _lpaq8_lib = None
+
+
+def _wait_for_library(timeout=300):
+    start = time.time()
+    while not os.path.exists(_LIB_PATH):
+        if time.time() - start > timeout:
+            raise TimeoutError("等待 lpaq8 动态库生成超时")
+        time.sleep(0.1)
 
 
 def _build_shared_library():
     if os.path.exists(_LIB_PATH):
         return
-    cmd = [
-        "g++",
-        "-std=c++11",
-        "-O3",
-        "-DNDEBUG",
-        "-fPIC",
-        "-shared",
-        "-o",
-        _LIB_NAME,
-        "lpaq8.cpp",
-    ]
-    subprocess.run(cmd, check=True, cwd=_MODULE_DIR)
+
+    lock_fd = None
+    try:
+        # 仅允许一个进程编译，其它进程阻塞等待
+        while True:
+            try:
+                lock_fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                if os.path.exists(_LIB_PATH):
+                    return
+                _wait_for_library()
+
+        cmd = [
+            "g++",
+            "-std=c++11",
+            "-O3",
+            "-DNDEBUG",
+            "-fPIC",
+            "-shared",
+            "-o",
+            _LIB_NAME,
+            "lpaq8.cpp",
+        ]
+        subprocess.run(cmd, check=True, cwd=_MODULE_DIR)
+    finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+                os.remove(_LOCK_PATH)
+            except OSError:
+                pass
 
 
 def _load_library():
@@ -36,6 +65,14 @@ def _load_library():
         _lpaq8_lib = ctypes.CDLL(_LIB_PATH)
         _lpaq8_lib.lpaq8_main.restype = ctypes.c_int
     return _lpaq8_lib
+
+
+def ensure_library_ready(preload: bool = False):
+    """确保 lpaq8 动态库已编译，必要时预加载以避免子进程重复构建"""
+    if preload:
+        _load_library()
+    else:
+        _build_shared_library()
 
 
 @contextmanager

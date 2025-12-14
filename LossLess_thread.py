@@ -19,7 +19,7 @@ from Bio import SeqIO
 import multiprocessing
 
 # 确保目录下有 lpaq8.py
-from lpaq8 import compress_bytes, decompress_bytes
+from lpaq8 import compress_bytes, decompress_bytes, ensure_library_ready
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -240,6 +240,9 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
     out_dir = os.path.dirname(output_path)
     if out_dir and not os.path.exists(out_dir): os.makedirs(out_dir)
 
+    # 预先编译并加载 lpaq8，避免子进程首次调用时阻塞
+    ensure_library_ready(preload=True)
+
     reads_per_block, total_reads = get_reads_num_per_block(fastq_path, block_size)
     total_block_count = int(np.ceil(os.path.getsize(fastq_path) / block_size)) if block_size > 0 else 1
 
@@ -451,6 +454,7 @@ def read_chunk_safe(mmap_obj, tag):
 
 def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
     output_path = get_output_path(compressed_path, output_path)
+    ensure_library_ready(preload=True)
     # 标记符定义
     id_regex_tag = b"%id_regex%"
     id_tokens_tag = b"%id_tokens%"
