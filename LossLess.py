@@ -4,14 +4,13 @@ import os
 import shutil
 import sys
 import time
-from tqdm import tqdm
+from collections import defaultdict
+from itertools import product
+
+import numpy as np
 from PIL import Image, UnidentifiedImageError
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
-import numpy as np
-from collections import defaultdict
-from itertools import product
-from PIL import Image
 from Bio import SeqIO
 from tqdm import tqdm
 import re
@@ -21,6 +20,11 @@ from lpaq8 import compress_file, decompress_file
 base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
 # 定义碱基从灰度值的映射
 gray_to_base = {32: 'A', 64: 'T', 192: 'G', 224: 'C', 0: 'N'}
+
+# 用于快速转换碱基字符到灰度值的查找表，避免为每个 read 构建临时列表
+base_lookup_table = np.zeros(256, dtype=np.uint8)
+for base, gray in base_to_gray.items():
+    base_lookup_table[ord(base)] = gray
 
 
 def find_delimiters(identifier):
@@ -129,10 +133,15 @@ def generate_g_prime(G, rules_dict, p_bar, gr_bar):
 
 # 对records做压缩
 def process_records(records, rules_dict, p_bar, gr_bar):
-    # 对原始数据进行处理
+    if not records:
+        return None, None, None
+
+    # 预分配 numpy 数组，避免累积 Python 列表导致的额外内存占用
+    record_length = len(records[0].seq)
+    record_count = len(records)
+    base_image_block = np.empty((record_count, record_length), dtype=np.uint8)
+    quality_block = np.empty((record_count, record_length), dtype=np.uint8)
     id_block = []
-    base_image_block = []
-    quality_block = []
 
     start_time = time.time()
 
@@ -144,11 +153,12 @@ def process_records(records, rules_dict, p_bar, gr_bar):
         regex = generate_regex(delimiters)
         id_block.append((tokens, regex))
 
-        base_gray_values = [base_to_gray.get(base, 0) for base in record.seq]
-        base_image_block.append(base_gray_values)
+        seq_bytes = np.frombuffer(str(record.seq).encode('ascii'), dtype=np.uint8)
+        seq_len = min(seq_bytes.size, record_length)
+        base_image_block[i, :seq_len] = base_lookup_table[seq_bytes[:seq_len]]
 
-        quality_gray_values = [q * 2 for q in record.letter_annotations["phred_quality"]]
-        quality_block.append(quality_gray_values)
+        quality_values = np.fromiter(record.letter_annotations["phred_quality"], dtype=np.uint8, count=record_length)
+        quality_block[i, :quality_values.size] = quality_values * 2
 
         p_bar.update(0.1)
         if gr_bar:
@@ -162,8 +172,7 @@ def process_records(records, rules_dict, p_bar, gr_bar):
         # # 更新剩余时间信息
         # p_bar.set_postfix(ETA=f"预计前端压缩剩余时间：{estimated_remaining_time:.1f}s")
 
-    g_prime = generate_g_prime(np.array(base_image_block, dtype=np.uint8), rules_dict, p_bar, gr_bar)
-    quality_block = np.array(quality_block, dtype=np.uint8)
+    g_prime = generate_g_prime(base_image_block, rules_dict, p_bar, gr_bar)
 
     p_bar.update(p_bar.total * 0.5 - p_bar.n)
     if gr_bar:

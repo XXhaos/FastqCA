@@ -170,7 +170,9 @@ To compile (g++ 3.4.5, upx 3.00w):
 #include <time.h>
 #include <math.h>
 #include <ctype.h>
+#ifndef NDEBUG
 #define NDEBUG  // remove for debugging
+#endif
 #include <assert.h>
 
 // 8, 16, 32 bit unsigned types (adjust as appropriate)
@@ -258,9 +260,10 @@ U32	TOLIMIT_10;
 #endif
 
 
-typedef enum {DEFAULT, TEXT, EXE };
+typedef enum {DEFAULT, TEXT, EXE } Method;
 
-U32 method=DEFAULT, mem_usage=0;
+Method method=DEFAULT;
+U32 mem_usage=0;
 
 U32 fb_done=0;
 U8 file_buf[FB_SIZE+4], *fb_pos=&file_buf[0], *fb_stop=&file_buf[FB_SIZE+4], *fb_len;
@@ -1400,7 +1403,7 @@ void Encoder::flush() {
 
 //////////////////////////// User Interface ////////////////////////////
 
-int main(int argc, char **argv) {
+int lpaq8_main_impl(int argc, char **argv) {
 
   // Check arguments
   if (argc!=4 || !isdigit(argv[1][0]) && argv[1][0]!='d') {
@@ -1451,7 +1454,8 @@ int main(int argc, char **argv) {
     out=fopen(argv[3], "wb");
     if (!out) perror(argv[3]), exit(1);
     fprintf(out, "pQ%c%c%c%c%c%c%c", 8, argv[1][0],
-      size>>24, size>>16, size>>8, size, method);
+      (int)((size>>24) & 0xFF), (int)((size>>16) & 0xFF),
+      (int)((size>>8) & 0xFF), (int)(size & 0xFF), (int)method);
 
     // Compress
     Encoder e(COMPRESS, out);
@@ -1538,4 +1542,12 @@ int main(int argc, char **argv) {
 	double(clock()-start)/CLOCKS_PER_SEC, mem_usage>>20);
 
   return 0;
+}
+
+extern "C" int lpaq8_main(int argc, char **argv) {
+  return lpaq8_main_impl(argc, argv);
+}
+
+int main(int argc, char **argv) {
+  return lpaq8_main_impl(argc, argv);
 }
