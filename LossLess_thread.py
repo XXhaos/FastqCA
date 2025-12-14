@@ -5,6 +5,7 @@ import sys
 import time
 import re
 import gc
+import io
 import mmap
 import struct  # 【新增】用于打包二进制长度数据
 from tqdm import tqdm
@@ -18,7 +19,7 @@ from Bio import SeqIO
 import multiprocessing
 
 # 确保目录下有 lpaq8.py
-from lpaq8 import compress_file, decompress_file
+from lpaq8 import compress_bytes, decompress_bytes
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -135,11 +136,6 @@ def save_intermediate_files(g_block, quality_block, id_block, output_path, block
             f2.write(regex + '\n')
 
 
-def compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path):
-    process = compress_file(temp_input_path, temp_output_path, lpaq8_path)
-    if process: process.wait()
-
-
 def write_safe_chunk(output_file, tag, data):
     """【核心修复】写入Tag + 8字节长度 + 数据，防止分隔符冲突"""
     # 写入 tag (如 %quality%)
@@ -153,60 +149,36 @@ def write_safe_chunk(output_file, tag, data):
 
 def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_path, save, block_count):
     part_output_path = os.path.join(os.path.dirname(output_path), f"chunk_{block_count}.part")
-    temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_proc_{block_count}")
-    temp_input_path, temp_output_path = f"{temp_prefix}_input", f"{temp_prefix}_output"
-
     back_dir = os.path.join(os.path.dirname(output_path), "back_compressed")
     if save: os.makedirs(back_dir, exist_ok=True)
 
-    try:
-        with open(part_output_path, "wb") as output_file:
-            # 1. ID Regex
-            with open(temp_input_path, "w") as f:
-                for _, regex in id_block: f.write(regex + '\n')
-            compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
-            if not os.path.exists(temp_output_path): raise RuntimeError("LPAQ8 compression failed for ID Regex")
-            with open(temp_output_path, "rb") as f:
-                data = f.read()
-            # 使用安全写入
-            write_safe_chunk(output_file, b"%id_regex%", data)
-            if save:
-                with open(os.path.join(back_dir, f"chunk_{block_count}_id_regex.lpaq8"), "wb") as sf: sf.write(data)
+    with open(part_output_path, "wb") as output_file:
+        regex_payload = "\n".join(regex for _, regex in id_block).encode() + b"\n"
+        data = compress_bytes(regex_payload)
+        write_safe_chunk(output_file, b"%id_regex%", data)
+        if save:
+            with open(os.path.join(back_dir, f"chunk_{block_count}_id_regex.lpaq8"), "wb") as sf: sf.write(data)
 
-            # 2. ID Tokens
-            with open(temp_input_path, "w") as f:
-                for tokens, _ in id_block: f.write(' '.join(tokens) + '\n')
-            compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
-            if not os.path.exists(temp_output_path): raise RuntimeError("LPAQ8 compression failed for ID Tokens")
-            with open(temp_output_path, "rb") as f:
-                data = f.read()
-            write_safe_chunk(output_file, b"%id_tokens%", data)
-            if save:
-                with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf: sf.write(data)
+        token_payload = "\n".join(' '.join(tokens) for tokens, _ in id_block).encode() + b"\n"
+        data = compress_bytes(token_payload)
+        write_safe_chunk(output_file, b"%id_tokens%", data)
+        if save:
+            with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf: sf.write(data)
 
-            # 3. Base
-            g_block.save(temp_input_path, format="tiff")
-            compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
-            if not os.path.exists(temp_output_path): raise RuntimeError("LPAQ8 compression failed for Base")
-            with open(temp_output_path, "rb") as f:
-                data = f.read()
-            write_safe_chunk(output_file, b"%base_g_prime%", data)
-            if save:
-                with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf: sf.write(data)
+        base_buffer = io.BytesIO()
+        g_block.save(base_buffer, format="tiff")
+        data = compress_bytes(base_buffer.getvalue())
+        write_safe_chunk(output_file, b"%base_g_prime%", data)
+        if save:
+            with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf: sf.write(data)
 
-            # 4. Quality
-            quality_block.save(temp_input_path, format="tiff")
-            compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
-            if not os.path.exists(temp_output_path): raise RuntimeError("LPAQ8 compression failed for Quality")
-            with open(temp_output_path, "rb") as f:
-                data = f.read()
-            write_safe_chunk(output_file, b"%quality%", data)
-            if save:
-                with open(os.path.join(back_dir, f"chunk_{block_count}_quality.lpaq8"), "wb") as sf: sf.write(data)
+        quality_buffer = io.BytesIO()
+        quality_block.save(quality_buffer, format="tiff")
+        data = compress_bytes(quality_buffer.getvalue())
+        write_safe_chunk(output_file, b"%quality%", data)
+        if save:
+            with open(os.path.join(back_dir, f"chunk_{block_count}_quality.lpaq8"), "wb") as sf: sf.write(data)
 
-    finally:
-        if os.path.exists(temp_input_path): os.remove(temp_input_path)
-        if os.path.exists(temp_output_path): os.remove(temp_output_path)
     return block_count
 
 
@@ -340,18 +312,6 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
 
 # --- Decompression Logic ---
 
-def monitor(process, temp_input_path, temp_output_path):
-    while True:
-        if os.path.exists(temp_input_path) and os.path.exists(temp_output_path):
-            if process.poll() is not None: break
-        time.sleep(0.1)
-
-
-def decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path):
-    process = decompress_file(temp_input_path, temp_output_path, lpaq8_path)
-    monitor(process, temp_input_path, temp_output_path)
-
-
 def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
                              block_count):
     back_compress_dir = os.path.join(os.path.dirname(output_path), "back_compressed")
@@ -360,58 +320,44 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         os.makedirs(back_compress_dir, exist_ok=True)
         os.makedirs(front_compress_dir, exist_ok=True)
 
-    temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_dec_{block_count}")
-    temp_input_path, temp_output_path = f"{temp_prefix}_in", f"{temp_prefix}_out"
-    id_regex, id_tokens, g_prime, quality = None, None, None, None
-
     try:
         # 1. ID Regex
-        with open(temp_input_path, "wb") as f:
-            f.write(id_regex_data)
-        with open(temp_output_path, "w+") as f:
-            decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-            f.seek(0)
-            id_regex = [line.strip() for line in f.readlines()]
+        id_regex_raw = decompress_bytes(id_regex_data)
+        id_regex = id_regex_raw.decode().splitlines()
         if save:
-            shutil.copy(temp_input_path, os.path.join(back_compress_dir, f"chunk_{block_count}_id_regex.lpaq8"))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f"chunk_{block_count}_id_regex.txt"))
+            with open(os.path.join(back_compress_dir, f"chunk_{block_count}_id_regex.lpaq8"), "wb") as f:
+                f.write(id_regex_data)
+            with open(os.path.join(front_compress_dir, f"chunk_{block_count}_id_regex.txt"), "w") as f:
+                f.write("\n".join(id_regex))
 
         # 2. ID Tokens
-        with open(temp_input_path, "wb") as f:
-            f.write(id_tokens_data)
-        with open(temp_output_path, "w+") as f:
-            decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-            f.seek(0)
-            id_tokens = [line.strip() for line in f.readlines()]
+        id_tokens_raw = decompress_bytes(id_tokens_data)
+        id_tokens = id_tokens_raw.decode().splitlines()
         if save:
-            shutil.copy(temp_input_path, os.path.join(back_compress_dir, f"chunk_{block_count}_id_tokens.lpaq8"))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f"chunk_{block_count}_id_tokens.txt"))
+            with open(os.path.join(back_compress_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as f:
+                f.write(id_tokens_data)
+            with open(os.path.join(front_compress_dir, f"chunk_{block_count}_id_tokens.txt"), "w") as f:
+                f.write("\n".join(id_tokens))
 
         id_block = zip(id_tokens, id_regex)
 
         # 3. Quality
-        with open(temp_input_path, "wb") as f:
-            f.write(quality_data)
-        decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        with Image.open(temp_output_path) as img:
+        quality_bytes = decompress_bytes(quality_data)
+        with Image.open(io.BytesIO(quality_bytes)) as img:
             quality = img.copy()
         if save:
-            shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
+            with open(os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'), "wb") as f:
+                f.write(quality_data)
+            quality.save(os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
 
         # 4. G Prime
-        with open(temp_input_path, "wb") as f:
-            f.write(g_prime_data)
-        decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        with Image.open(temp_output_path) as img:
+        g_prime_bytes = decompress_bytes(g_prime_data)
+        with Image.open(io.BytesIO(g_prime_bytes)) as img:
             g_prime = img.copy()
         if save:
-            shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
-
-    finally:
-        if os.path.exists(temp_input_path): os.remove(temp_input_path)
-        if os.path.exists(temp_output_path): os.remove(temp_output_path)
+            with open(os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'), "wb") as f:
+                f.write(g_prime_data)
+            g_prime.save(os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
 
     return id_block, g_prime, quality
 

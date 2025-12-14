@@ -1400,7 +1400,7 @@ void Encoder::flush() {
 
 //////////////////////////// User Interface ////////////////////////////
 
-int main(int argc, char **argv) {
+int lpaq8_main_impl(int argc, char **argv) {
 
   // Check arguments
   if (argc!=4 || !isdigit(argv[1][0]) && argv[1][0]!='d') {
@@ -1538,4 +1538,12 @@ int main(int argc, char **argv) {
 	double(clock()-start)/CLOCKS_PER_SEC, mem_usage>>20);
 
   return 0;
+}
+
+extern "C" int lpaq8_main(int argc, char **argv) {
+  return lpaq8_main_impl(argc, argv);
+}
+
+int main(int argc, char **argv) {
+  return lpaq8_main_impl(argc, argv);
 }

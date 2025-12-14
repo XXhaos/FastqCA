@@ -1,94 +1,117 @@
+import ctypes
+import io
 import os
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
+
+_LIB_NAME = "liblpaq8.so"
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_LIB_PATH = os.path.join(_MODULE_DIR, _LIB_NAME)
+_lpaq8_lib = None
 
 
-def compress_lpaq8(lpaq8_path, input_path, output_path, compression_level='9'):
-    """
-    使用lpaq8压缩单个文件。
+def _build_shared_library():
+    if os.path.exists(_LIB_PATH):
+        return
+    cmd = [
+        "g++",
+        "-std=c++11",
+        "-O3",
+        "-DNDEBUG",
+        "-fPIC",
+        "-shared",
+        "-o",
+        _LIB_NAME,
+        "lpaq8.cpp",
+    ]
+    subprocess.run(cmd, check=True, cwd=_MODULE_DIR)
 
-    参数:
-    - lpaq8_path: lpaq8的路径。
-    - compression_level: 压缩级别。
-    - input_path: 输入文件路径。
-    - output_path: 输出文件路径。
-    """
-    command = [lpaq8_path, compression_level, input_path, output_path]
+
+def _load_library():
+    global _lpaq8_lib
+    if _lpaq8_lib is None:
+        _build_shared_library()
+        _lpaq8_lib = ctypes.CDLL(_LIB_PATH)
+        _lpaq8_lib.lpaq8_main.restype = ctypes.c_int
+    return _lpaq8_lib
+
+
+@contextmanager
+def _memfd(name, data=None):
+    if hasattr(os, "memfd_create"):
+        fd = os.memfd_create(name)
+    else:
+        fd = os.open(os.path.join(_MODULE_DIR, f".{name}"), os.O_RDWR | os.O_CREAT | os.O_TRUNC)
     try:
-        process = subprocess.Popen(command)
-        return process
-        # print(f"文件 {input_path} 压缩成功，保存为 {output_path}")
-    except subprocess.CalledProcessError as e:
-        print(f"压缩过程中出错: {e}")
-    except Exception as e:
-        print(f"发生未知错误: {str(e)}")
-
-def compress_lpaq8_test(lpaq8_path, input_stream, output_path, compression_level='9'):
-    """
-    使用lpaq8压缩单个文件。
-
-    参数:
-    - lpaq8_path: lpaq8的路径。
-    - compression_level: 压缩级别。
-    - input_path: 输入文件路径。
-    - output_path: 输出文件路径。
-    """
-    command = [lpaq8_path, compression_level, input_stream, output_path]
-    try:
-        subprocess.run(command, check=True)
-        print(f"文件 {input_stream} 压缩成功，保存为 {output_path}")
-    except subprocess.CalledProcessError as e:
-        print(f"压缩过程中出错: {e}")
-    except Exception as e:
-        print(f"发生未知错误: {str(e)}")
+        if data:
+            os.write(fd, data)
+            os.lseek(fd, 0, os.SEEK_SET)
+        yield fd, f"/proc/self/fd/{fd}"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        # cleanup fallback file if created on disk
+        fallback_path = os.path.join(_MODULE_DIR, f".{name}")
+        if os.path.exists(fallback_path):
+            try:
+                os.remove(fallback_path)
+            except OSError:
+                pass
 
 
-def decompress_lpaq8(lpaq8_path, input_path, output_path):
-    """
-    使用lpaq8压缩单个文件。
-
-    参数:
-    - lpaq8_path: lpaq8的路径。
-    - compression_level: 压缩级别。
-    - input_path: 输入文件路径。
-    - output_path: 输出文件路径。
-    """
-    command = [lpaq8_path, 'd', input_path, output_path]
-    try:
-        process = subprocess.Popen(command)
-        # print(f"文件 {input_path} 解压成功，保存为 {output_path}")
-        return process
-    except subprocess.CalledProcessError as e:
-        print(f"解压过程中出错: {e}")
-    except Exception as e:
-        print(f"发生未知错误: {str(e)}")
+def _run_lpaq8(argv):
+    lib = _load_library()
+    argc = len(argv)
+    c_argv = (ctypes.c_char_p * argc)(*argv)
+    ret = lib.lpaq8_main(argc, c_argv)
+    if ret != 0:
+        raise RuntimeError(f"lpaq8 native 调用失败，返回码 {ret}")
 
 
-def compress_file(input_file, output_file, lpaq8_path, compression_level='9'):
-    """
-    压缩指定的文件。
-
-    参数:
-    - input_file: 完整的输入文件路径。
-    - output_file: 压缩文件的输出目录。
-    - lpaq8_path: lpaq8压缩器的完整路径。
-    - compression_level: 压缩级别（默认为9，范围0-9）。
-    """
-    # 调用lpaq8进行压缩
-    return compress_lpaq8(lpaq8_path, input_file, output_file, compression_level)
+def compress_bytes(data: bytes, compression_level: str = '9') -> bytes:
+    argv = [
+        b"lpaq8",
+        compression_level.encode(),
+    ]
+    with _memfd("lpaq8_in", data) as (in_fd, in_path), _memfd("lpaq8_out") as (out_fd, out_path):
+        argv.extend([in_path.encode(), out_path.encode()])
+        _run_lpaq8(argv)
+        os.lseek(out_fd, 0, os.SEEK_SET)
+        return os.read(out_fd, os.fstat(out_fd).st_size)
 
 
-def decompress_file(input_file, output_file, lpaq8_path):
-    """
-    压缩指定的文件。
+def decompress_bytes(data: bytes) -> bytes:
+    argv = [
+        b"lpaq8",
+        b"d",
+    ]
+    with _memfd("lpaq8_in", data) as (in_fd, in_path), _memfd("lpaq8_out") as (out_fd, out_path):
+        argv.extend([in_path.encode(), out_path.encode()])
+        _run_lpaq8(argv)
+        os.lseek(out_fd, 0, os.SEEK_SET)
+        return os.read(out_fd, os.fstat(out_fd).st_size)
 
-    参数:
-    - input_file: 完整的输入文件路径。
-    - output_directory: 压缩文件的输出目录。
-    - lpaq8_path: lpaq8压缩器的完整路径。
-    """
-    return decompress_lpaq8(lpaq8_path, input_file, output_file)
+
+def compress_file(input_file, output_file, lpaq8_path=None, compression_level='9'):
+    with open(input_file, "rb") as f:
+        data = f.read()
+    compressed = compress_bytes(data, compression_level)
+    with open(output_file, "wb") as f:
+        f.write(compressed)
+    return None
+
+
+def decompress_file(input_file, output_file, lpaq8_path=None):
+    with open(input_file, "rb") as f:
+        data = f.read()
+    decompressed = decompress_bytes(data)
+    with open(output_file, "wb") as f:
+        f.write(decompressed)
+    return None
 
 
 def compress_all_files_in_directory(input_directory, output_directory, lpaq8_path, compression_level='9'):
