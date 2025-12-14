@@ -1,66 +1,119 @@
 import argparse
 import os
+from typing import Optional
 
-# 假设 Lossy 保持不变
-from Lossy import main as lossy
+from Bio import SeqIO
 
-# 【修改】这里改为导入 LossLess_thread
-# 注意：确保 LossLess_thread.py 和 main.py 在同一个目录下
-from LossLess_thread import compress_multithread, decompress
+from Lossy_thread import (
+    compress_multithread as lossy_compress,
+    decompress as lossy_decompress,
+    delete_temp_files as lossy_cleanup,
+    get_output_path as lossy_output_path,
+)
+from LossLess_thread import (
+    compress_multithread as lossless_compress,
+    decompress as lossless_decompress,
+    delete_temp_files as lossless_cleanup,
+)
 
-if __name__ == '__main__':
+
+LOSSY_COMMANDS = ["Lossy", "lossy"]
+LOSSLESS_COMMANDS = ["LossLess", "lossless", "lossLess", "Lossless"]
+
+
+def count_reads(fastq_path: str) -> int:
+    return sum(1 for _ in SeqIO.parse(fastq_path, "fastq"))
+
+
+def read_manifest(manifest_path: str) -> Optional[int]:
+    if not os.path.exists(manifest_path):
+        return None
+    with open(manifest_path, "r") as handle:
+        content = handle.read().strip()
+        try:
+            return int(content)
+        except ValueError:
+            return None
+
+
+def write_manifest(manifest_path: str, read_count: int) -> None:
+    with open(manifest_path, "w") as handle:
+        handle.write(str(read_count))
+
+
+def main() -> None:
     lpaq8_path = f"{os.getcwd()}/lpaq8"
 
-    # 创建参数解析器
-    parser = argparse.ArgumentParser(description='fastq compress')
-
-    # 添加参数
-    parser.add_argument('--compressor', type=str, default='Lossy', help='Lossy or LossLess?')
-    parser.add_argument('--input_path', type=str, required=True, help='input_path')
-    parser.add_argument('--output_path', type=str, required=True, help='output_path')
-    parser.add_argument('--mode', type=str, required=True, help='mode: c (compress) or d (decompress)')
-    parser.add_argument('--save', type=str, default='False', help='save intermediate files (default: False)')
-
-    # 多线程相关参数
-    parser.add_argument('--threads', type=int, default=4, help='number of threads/workers')
-    parser.add_argument('--block_size', type=int, default=256 * 1024 * 1024, help='block size in bytes')
-
-    # 解析参数
+    parser = argparse.ArgumentParser(description="fastq compress (multithread version)")
+    parser.add_argument("--compressor", type=str, default="Lossy", help="Lossy or LossLess?")
+    parser.add_argument("--input_path", type=str, required=True, help="input_path")
+    parser.add_argument("--output_path", type=str, required=True, help="output_path")
+    parser.add_argument("--mode", type=str, required=True, help="compress(c) or decompress(d)")
+    parser.add_argument("--save", type=str, default="False", help="save intermediate files (True/False)")
+    parser.add_argument("--threads", type=int, default=os.cpu_count(), help="number of worker threads")
+    parser.add_argument("--block_size", type=int, default=128 * 1024 * 1024, help="block size in bytes")
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default=None,
+        help="可选的 read 数量清单文件路径。默认为压缩文件后缀 .readcount",
+    )
     args = parser.parse_args()
 
-    # 处理 save 参数
-    save_flag = args.save.lower() == 'true'
+    save_flag = args.save.lower() == "true"
 
-    Lossy_commands = ['Lossy', 'lossy']
-    # 扩充命令列表，包含 'Lossless_thread'
-    LossLess_commands = ['LossLess', 'lossless', 'lossLess', 'Lossless', 'Lossless_thread']
+    if args.compressor in LOSSY_COMMANDS:
+        archive_path = lossy_output_path(args.input_path, args.output_path)
+        manifest_path = args.manifest or f"{archive_path}.readcount"
 
-    if args.compressor in Lossy_commands:
-        lossy(args.mode, args.input_path, args.output_path, lpaq8_path, args.save, None)
-
-    elif args.compressor in LossLess_commands:
-        # 调用 LossLess_thread 中的函数
-        if args.mode in ['c', 'compress']:
-            compress_multithread(
+        if args.mode in ["compress", "c"]:
+            read_count = count_reads(args.input_path)
+            lossy_compress(
                 args.input_path,
                 args.output_path,
                 lpaq8_path,
                 save_flag,
                 args.block_size,
-                args.threads
+                args.threads,
             )
-        elif args.mode in ['d', 'decompress']:
-            decompress(
+            write_manifest(manifest_path, read_count)
+            if not save_flag:
+                lossy_cleanup(args.output_path)
+        elif args.mode in ["decompress", "d"]:
+            lossy_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+            restored_path = lossy_output_path(args.input_path, args.output_path)
+            restored_reads = count_reads(restored_path)
+            expected_reads = read_manifest(manifest_path)
+            if expected_reads is not None and restored_reads != expected_reads:
+                raise RuntimeError(
+                    f"解压后的 read 数量 ({restored_reads}) 与清单记录的数量 ({expected_reads}) 不一致"
+                )
+            if not save_flag:
+                lossy_cleanup(args.output_path)
+        else:
+            raise SystemExit("错误：没有指定正确的模式")
+
+    elif args.compressor in LOSSLESS_COMMANDS:
+        if args.mode in ["compress", "c"]:
+            lossless_compress(
                 args.input_path,
                 args.output_path,
                 lpaq8_path,
                 save_flag,
-                None
+                args.block_size,
+                args.threads,
             )
+            if not save_flag:
+                lossless_cleanup(args.output_path)
+        elif args.mode in ["decompress", "d"]:
+            lossless_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+            if not save_flag:
+                lossless_cleanup(args.output_path)
         else:
-            print(f"错误：未知的模式 {args.mode}")
-            exit(1)
-
+            raise SystemExit("错误：没有指定正确的模式")
     else:
-        print("错误：没有指定正确的压缩器")
-        exit(1)
+        raise SystemExit("错误：没有指定正确的压缩器")
+
+
+if __name__ == "__main__":
+    main()
