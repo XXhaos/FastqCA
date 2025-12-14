@@ -359,7 +359,9 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
                 f.write(g_prime_data)
             g_prime.save(os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
 
-    return id_block, g_prime, quality
+        return id_block, g_prime, quality
+    except Exception as e:
+        raise RuntimeError(f"解压块 {block_count} 失败: {e}") from e
 
 
 def reconstruct_id(tokens, regex):
