@@ -251,6 +251,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
     os.makedirs(temp_chunk_dir, exist_ok=True)
 
     read_count_per_block, block_count = 0, 1
+    task_timeout = 600  # 单块最长等待时间（秒），防止子进程卡死无法退出
 
     # 保持 maxtasksperchild=1 防止内存泄漏
     with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
@@ -263,6 +264,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
 
         def dispatch_current_chunk(path, count, record_total):
             temp_handle.close()
+            tqdm.write(f"info：提交块 {count} ({record_total} reads) 至工作进程")
             res = pool.apply_async(
                 process_block_task_from_file,
                 (path, count, output_path, lpaq8_path, save, record_total)
@@ -295,12 +297,18 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
                 pass
 
         pool.close()
-        tqdm.write("info：等待所有子进程完成...")
-        for res in tqdm(results, desc="Waiting Workers"):
+        tqdm.write("info：等待所有子进程完成（设置超时以防卡死）...")
+
+        for idx, res in enumerate(tqdm(results, desc="Waiting Workers")):
             try:
-                res.get()
+                res.get(timeout=task_timeout)
+            except multiprocessing.TimeoutError:
+                pool.terminate()
+                raise TimeoutError(
+                    f"块 {idx + 1} 等待超过 {task_timeout} 秒，可能发生死锁或 lpaq8 未响应")
             except Exception as e:
                 errors.append(e)
+
         pool.join()
 
         if errors:
