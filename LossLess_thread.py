@@ -275,7 +275,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
     temp_chunk_dir = os.path.join(out_dir, "temp_chunks")
     os.makedirs(temp_chunk_dir, exist_ok=True)
 
-    records, read_count_per_block, block_count = [], 0, 1
+    read_count_per_block, block_count = 0, 1
 
     # 保持 maxtasksperchild=1 防止内存泄漏
     with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
@@ -283,33 +283,41 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
         errors = []
         tqdm.write(f"info：正在读取 FASTQ 并分发任务...")
 
-        with open(fastq_path, 'r') as file:
-            for record in tqdm(SeqIO.parse(file, "fastq"), desc="Chunking", total=total_reads, unit="reads"):
-                records.append(record)
-                read_count_per_block += 1
-                if read_count_per_block >= reads_per_block:
-                    temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
-                    SeqIO.write(records, temp_chunk_path, "fastq")
-                    res = pool.apply_async(
-                        process_block_task_from_file,
-                        (temp_chunk_path, block_count, output_path, lpaq8_path, save, read_count_per_block)
-                    )
-                    results.append(res)
-                    if len(results) > max_workers * 2:
-                        results = [r for r in results if not r.ready()]
-                        if len(results) > max_workers * 3: time.sleep(1)
-                    records, read_count_per_block = [], 0
-                    block_count += 1
-            if records:
-                temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
-                SeqIO.write(records, temp_chunk_path, "fastq")
-                res = pool.apply_async(
-                    process_block_task_from_file,
-                    (temp_chunk_path, block_count, output_path, lpaq8_path, save, read_count_per_block)
-                )
-                results.append(res)
-            else:
-                block_count -= 1
+        temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
+        temp_handle = open(temp_chunk_path, 'w')
+
+        def dispatch_current_chunk(path, count, record_total):
+            temp_handle.close()
+            res = pool.apply_async(
+                process_block_task_from_file,
+                (path, count, output_path, lpaq8_path, save, record_total)
+            )
+            results.append(res)
+
+        try:
+            with open(fastq_path, 'r') as file:
+                for record in tqdm(SeqIO.parse(file, "fastq"), desc="Chunking", total=total_reads, unit="reads"):
+                    SeqIO.write([record], temp_handle, "fastq")
+                    read_count_per_block += 1
+                    if read_count_per_block >= reads_per_block:
+                        dispatch_current_chunk(temp_chunk_path, block_count, read_count_per_block)
+                        if len(results) > max_workers * 2:
+                            results = [r for r in results if not r.ready()]
+                            if len(results) > max_workers * 3: time.sleep(1)
+                        block_count += 1
+                        temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
+                        temp_handle = open(temp_chunk_path, 'w')
+                        read_count_per_block = 0
+                if read_count_per_block > 0:
+                    dispatch_current_chunk(temp_chunk_path, block_count, read_count_per_block)
+                else:
+                    temp_handle.close()
+                    block_count -= 1
+        finally:
+            try:
+                temp_handle.close()
+            except Exception:
+                pass
 
         pool.close()
         tqdm.write("info：等待所有子进程完成...")
