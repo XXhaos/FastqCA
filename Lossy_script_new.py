@@ -1,7 +1,7 @@
-"""
-Helper script to run lossy compression over FASTQ inputs using the existing
-pipeline in ``main.py``. Metrics for each file (size, ratio, speed, CPU, and
-peak memory) are logged to a timestamped CSV in the output directory.
+"""Lossy compression experiment runner.
+
+Runs lossy compression with the same input/output directories as the lossless
+experimental script (LossLess_script_new.py) and records CPU/memory metrics.
 """
 
 import os
@@ -12,6 +12,11 @@ import csv
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+
+# 与无损实验脚本保持一致的线程数与输入/输出目录
+THREAD_COUNT = '4'
+INPUT_DIR = '/media/compress/新加卷/test'
+OUTPUT_DIR = '/media/compress/新加卷/output/test_FastCA_thread'
 
 def get_file_size(file_path):
     return os.path.getsize(file_path)
@@ -89,7 +94,8 @@ def compress_and_collect_metrics(input_file, output_dir):
         '--compressor', 'Lossy',
         '--input_path', input_file,
         '--output_path', output_dir,
-        '--mode', 'c'
+        '--mode', 'c',
+        '--threads', THREAD_COUNT,
     ]
 
     print(f"Executing: {' '.join(cmd)}")
@@ -123,8 +129,8 @@ def compress_and_collect_metrics(input_file, output_dir):
 
 
 def main():
-    input_dir = '/media/compress/新加卷/test'
-    output_dir = '/media/compress/新加卷/output/test_FastqCA_lossy_thread'
+    input_dir = INPUT_DIR
+    output_dir = OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
 
     csv_path = os.path.join(output_dir, f'compression_metrics_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')

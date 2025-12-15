@@ -1,3 +1,5 @@
+"""Lossy decompression experiment script aligned with lossless paths."""
+
 import os
 import subprocess
 import time
@@ -5,6 +7,9 @@ import psutil
 import csv
 from pathlib import Path
 from datetime import datetime
+
+INPUT_DIR = "/media/compress/新加卷/output/test_FastCA_thread"
+DECOMPRESSED_DIR = "/media/compress/新加卷/output/test_FastCA_thread_decompressed"
 
 def get_file_size(file_path):
     """返回文件大小（字节）"""
@@ -104,9 +109,9 @@ def decompress_and_collect_metrics(input_file, output_dir, decompressed_dir):
     }
 
 def main():
-    # 与压缩脚本一致：压缩输出目录
-    input_dir = "/media/compress/新加卷/output/test_FastCA-Lossy"     # 解压的输入目录（= 压缩脚本的输出目录）
-    decompressed_dir = "/media/compress/新加卷/output/test_FastCA-Lossy_decompressed"  # 解压后的FASTQ目录
+    # 与无损/有损压缩实验脚本保持相同的输入/输出目录
+    input_dir = INPUT_DIR
+    decompressed_dir = DECOMPRESSED_DIR
     os.makedirs(decompressed_dir, exist_ok=True)
 
     # 结果CSV
