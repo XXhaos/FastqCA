@@ -85,7 +85,7 @@ def compress_and_collect_metrics(input_file, output_dir):
 
     cmd = [
         'python', 'main_new.py',
-        '--compressor', 'Lossless_thread',
+        '--compressor', 'Lossless',
         '--input_path', input_file,
         '--output_path', output_dir,
         '--mode', 'c',
