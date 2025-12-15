@@ -82,6 +82,8 @@ def main() -> None:
         elif args.mode in ["decompress", "d"]:
             lossy_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
             restored_path = lossy_output_path(args.input_path, args.output_path)
+            if not restored_path.endswith(".fastq"):
+                restored_path = f"{restored_path}.fastq"
             restored_reads = count_reads(restored_path)
             expected_reads = read_manifest(manifest_path)
             if expected_reads is not None and restored_reads != expected_reads:

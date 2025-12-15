@@ -136,8 +136,10 @@ def main():
     # 压缩脚本的产物命名为 output_dir/<原文件名去掉.fastq>（无扩展名），同目录还会有metrics CSV。
     # 这里过滤：排除目录与 .csv，仅处理常规文件。
     candidates = [
-        p for p in Path(input_dir).iterdir()
-        if p.is_file() and p.suffix.lower() != ".csv"
+        p
+        for p in Path(input_dir).iterdir()
+        if p.is_file()
+        and p.suffix.lower() not in {".csv", ".readcount"}
     ]
     # 若你的 main.py 产物有专用扩展名，可改成类似：Path(input_dir).glob("*.lz") 等。
 
