@@ -499,7 +499,7 @@ def read_chunk_safe(mmap_obj, tag):
     return data
 
 
-def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
+def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_workers):
     output_path = get_output_path(compressed_path, output_path)
     # 标记符定义
     id_regex_tag = b"%id_regex%"
@@ -512,34 +512,69 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
     with open(compressed_path, "r+b") as input_file:
         if os.path.getsize(compressed_path) == 0: return
 
-        # 使用mmap防止OOM
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            tqdm.write("info：开始解压 (安全长度模式)...")
+            tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
+            # 使用进程池并行处理后端解压，主进程负责按顺序落盘
+            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
+                pending = {}
+                next_to_write = 1
+                errors = []
 
-            while True:
-                # 如果后续仅剩EOF标记，则结束
-                remaining = mm.size() - mm.tell()
-                if remaining == len(eof_tag):
-                    tail = mm.read(len(eof_tag))
-                    if tail != eof_tag:
-                        raise RuntimeError("解压结束时未发现EOF标记，压缩文件可能损坏")
-                    tqdm.write("info：检测到EOF，解压结束。")
-                    break
+                def flush_ready_results():
+                    nonlocal next_to_write
+                    while next_to_write in pending and pending[next_to_write].ready():
+                        try:
+                            id_block, g_prime, quality = pending[next_to_write].get()
+                        except Exception as exc:
+                            errors.append(exc)
+                        else:
+                            reconstruct_fastq(
+                                output_path, id_block, g_prime, quality, is_first_block=(next_to_write == 1)
+                            )
+                        del pending[next_to_write]
+                        next_to_write += 1
 
-                # 依次读取四个块，严格依赖长度头
-                id_regex_data = read_chunk_safe(mm, id_regex_tag)
-                id_tokens_data = read_chunk_safe(mm, id_tokens_tag)
-                g_prime_data = read_chunk_safe(mm, base_tag)
-                quality_data = read_chunk_safe(mm, quality_tag)
+                while True:
+                    remaining = mm.size() - mm.tell()
+                    if remaining == len(eof_tag):
+                        tail = mm.read(len(eof_tag))
+                        if tail != eof_tag:
+                            raise RuntimeError("解压结束时未发现EOF标记，压缩文件可能损坏")
+                        tqdm.write("info：检测到EOF，解压结束。")
+                        break
 
-                tqdm.write(f"正在处理块: {block_count}")
+                    id_regex_data = read_chunk_safe(mm, id_regex_tag)
+                    id_tokens_data = read_chunk_safe(mm, id_tokens_tag)
+                    g_prime_data = read_chunk_safe(mm, base_tag)
+                    quality_data = read_chunk_safe(mm, quality_tag)
 
-                id_block, g_prime, quality = process_compressed_block(
-                    output_path, lpaq8_path, id_regex_data, id_tokens_data,
-                    g_prime_data, quality_data, save, block_count
-                )
-                reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=(block_count == 1))
-                block_count += 1
+                    tqdm.write(f"正在处理块: {block_count}")
+
+                    pending[block_count] = pool.apply_async(
+                        process_compressed_block,
+                        (output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save, block_count)
+                    )
+                    block_count += 1
+
+                    # 控制队列长度并尽早回写完成的块
+                    if len(pending) > max_workers * 3:
+                        time.sleep(0.1)
+                    flush_ready_results()
+
+                pool.close()
+                pool.join()
+
+                # 写入剩余结果
+                for idx in sorted(pending.keys()):
+                    try:
+                        id_block, g_prime, quality = pending[idx].get()
+                    except Exception as exc:
+                        errors.append(exc)
+                        continue
+                    reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=(idx == 1))
+
+                if errors:
+                    raise RuntimeError(f"检测到 {len(errors)} 个解压块处理失败: {errors}")
 
 
 def get_output_path(input_path, output_path):
@@ -584,7 +619,7 @@ def main():
         compress_multithread(args.input_path, args.output_path, lpaq8_path, save_flag, args.block_size, args.threads)
         if not save_flag: delete_temp_files(args.output_path)
     elif args.mode in ['decompress', 'd']:
-        decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+        decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None, args.threads)
         if not save_flag: delete_temp_files(args.output_path)
     else:
         print("Unknown mode")

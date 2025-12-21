@@ -80,7 +80,14 @@ def main() -> None:
             if not save_flag:
                 lossy_cleanup(args.output_path)
         elif args.mode in ["decompress", "d"]:
-            lossy_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+            lossy_decompress(
+                args.input_path,
+                args.output_path,
+                lpaq8_path,
+                save_flag,
+                None,
+                args.threads,
+            )
             restored_path = lossy_output_path(args.input_path, args.output_path)
             restored_reads = count_reads(restored_path)
             expected_reads = read_manifest(manifest_path)
@@ -106,7 +113,14 @@ def main() -> None:
             if not save_flag:
                 lossless_cleanup(args.output_path)
         elif args.mode in ["decompress", "d"]:
-            lossless_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+            lossless_decompress(
+                args.input_path,
+                args.output_path,
+                lpaq8_path,
+                save_flag,
+                None,
+                args.threads,
+            )
             if not save_flag:
                 lossless_cleanup(args.output_path)
         else:
