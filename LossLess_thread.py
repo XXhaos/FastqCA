@@ -16,7 +16,6 @@ from collections import defaultdict
 from itertools import product, chain
 from Bio import SeqIO
 import multiprocessing
-from multiprocessing.pool import ThreadPool
 
 # 确保目录下有 lpaq8.py
 from lpaq8 import compress_file, decompress_file
@@ -516,8 +515,8 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
-            # 使用线程池并行处理后端解压，主进程负责按顺序落盘，避免跨进程传递大块数据的开销
-            with ThreadPool(processes=max_workers) as pool:
+            # 使用进程池并行处理后端解压，避免 GIL 限制，同时由主进程按顺序落盘
+            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
