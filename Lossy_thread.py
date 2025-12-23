@@ -16,6 +16,7 @@ from collections import defaultdict
 from itertools import product
 from Bio import SeqIO
 import multiprocessing
+from multiprocessing.pool import ThreadPool
 
 from lpaq8 import compress_file, decompress_file
 
@@ -363,7 +364,7 @@ def monitor(process, temp_input_path, temp_output_path):
 
 def decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path):
     process = decompress_file(temp_input_path, temp_output_path, lpaq8_path)
-    monitor(process, temp_input_path, temp_output_path)
+    process.wait()
 
 
 def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
@@ -550,7 +551,8 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
             return
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
-            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
+            # 线程池避免在解压阶段跨进程传递大块数据带来的额外复制开销
+            with ThreadPool(processes=max_workers) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
