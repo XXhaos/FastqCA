@@ -6,6 +6,9 @@ import csv
 from pathlib import Path
 from datetime import datetime
 
+# 解压实验线程数（需与压缩侧保持一致）
+THREAD_COUNT = "4"
+
 def get_file_size(file_path):
     """返回文件大小（字节）"""
     return os.path.getsize(file_path)
@@ -51,7 +54,8 @@ def decompress_and_collect_metrics(input_file, output_dir, decompressed_dir):
         "--compressor", "Lossy",
         "--input_path", input_file,
         "--output_path", decompressed_dir,
-        "--mode", "d"
+        "--mode", "d",
+        "--threads", THREAD_COUNT,
     ]
 
     start_time = time.time()

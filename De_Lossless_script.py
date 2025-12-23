@@ -11,6 +11,10 @@ import psutil
 # 与 LossLess_script_new 保持一致的监控逻辑
 
 
+# 与压缩实验保持一致的线程数配置
+THREAD_COUNT = "4"
+
+
 def get_file_size(file_path: Path) -> int:
     return file_path.stat().st_size if file_path.exists() else 0
 
@@ -81,6 +85,8 @@ def decompress_and_collect_metrics(input_file: Path, output_dir: Path, decompres
         str(decompressed_dir),
         "--mode",
         "d",
+        "--threads",
+        THREAD_COUNT,
     ]
 
     start_time = time.time()
