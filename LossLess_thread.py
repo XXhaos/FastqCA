@@ -364,6 +364,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
     temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_dec_{block_count}")
     temp_input_path, temp_output_path = f"{temp_prefix}_in", f"{temp_prefix}_out"
     id_regex, id_tokens, g_prime, quality = None, None, None, None
+    temp_fastq_path = os.path.join(os.path.dirname(output_path), f"temp_dec_fastq_{block_count}.fastq")
 
     try:
         # 1. ID Regex
@@ -414,7 +415,9 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
         if os.path.exists(temp_output_path): os.remove(temp_output_path)
 
-    return id_block, g_prime, quality
+        reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=True, custom_path=temp_fastq_path)
+
+    return temp_fastq_path
 
 
 def reconstruct_id(tokens, regex):
@@ -459,9 +462,11 @@ def reconstruct_base_and_quality(g_prime_img, quality_img):
     return bases, qualities
 
 
-def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False):
+def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False, custom_path=None):
     records = []
-    final_fastq_path = output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
+    target_fastq_path = custom_path if custom_path else (
+        output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
+    )
 
     id_block = list(id_block)
     id_tokens = [item[0] for item in id_block]
@@ -475,10 +480,11 @@ def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_
         record.letter_annotations["phred_quality"] = quality[i]
         records.append(record)
 
-    # 首块使用写入模式覆盖旧文件，避免重复解压导致结果被追加
-    mode = 'w' if is_first_block else 'a'
-    with open(final_fastq_path, mode) as output_handle:
+    mode = 'w' if custom_path or is_first_block else 'a'
+    with open(target_fastq_path, mode) as output_handle:
         SeqIO.write(records, output_handle, 'fastq')
+
+    return target_fastq_path
 
 
 def read_chunk_safe(mmap_obj, tag):
@@ -510,6 +516,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
     eof_tag = b"%eof"
 
     block_count = 1
+    final_fastq_path = output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
     with open(compressed_path, "r+b") as input_file:
         if os.path.getsize(compressed_path) == 0: return
 
@@ -525,13 +532,14 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                     nonlocal next_to_write
                     while next_to_write in pending and pending[next_to_write].ready():
                         try:
-                            id_block, g_prime, quality = pending[next_to_write].get()
+                            temp_fastq_path = pending[next_to_write].get()
                         except Exception as exc:
                             errors.append(exc)
                         else:
-                            reconstruct_fastq(
-                                output_path, id_block, g_prime, quality, is_first_block=(next_to_write == 1)
-                            )
+                            mode = 'w' if next_to_write == 1 else 'a'
+                            with open(temp_fastq_path, 'r') as src, open(final_fastq_path, mode) as dst:
+                                shutil.copyfileobj(src, dst)
+                            os.remove(temp_fastq_path)
                         del pending[next_to_write]
                         next_to_write += 1
 
@@ -568,11 +576,14 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                 # 写入剩余结果
                 for idx in sorted(pending.keys()):
                     try:
-                        id_block, g_prime, quality = pending[idx].get()
+                        temp_fastq_path = pending[idx].get()
                     except Exception as exc:
                         errors.append(exc)
                         continue
-                    reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=(idx == 1))
+                    mode = 'w' if idx == 1 else 'a'
+                    with open(temp_fastq_path, 'r') as src, open(final_fastq_path, mode) as dst:
+                        shutil.copyfileobj(src, dst)
+                    os.remove(temp_fastq_path)
 
                 if errors:
                     raise RuntimeError(f"检测到 {len(errors)} 个解压块处理失败: {errors}")
