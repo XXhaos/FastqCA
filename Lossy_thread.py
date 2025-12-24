@@ -13,18 +13,13 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import numpy as np
 from collections import defaultdict
-from itertools import product
+from itertools import product, chain
 from Bio import SeqIO
 import multiprocessing
 
 from lpaq8 import compress_file, decompress_file
 
 Image.MAX_IMAGE_PIXELS = None
-
-# 映射表
-base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
-gray_to_base = {32: 'A', 64: 'T', 192: 'G', 224: 'C', 0: 'N'}
-
 
 def Q4(qsc):
     if qsc <= 7:
@@ -34,6 +29,15 @@ def Q4(qsc):
     if qsc <= 19:
         return 18
     return 24
+
+
+# 映射表
+base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
+gray_to_base = {32: 'A', 64: 'T', 192: 'G', 224: 'C', 0: 'N'}
+base_gray_lut = np.zeros(256, dtype=np.uint8)
+for base, value in base_to_gray.items():
+    base_gray_lut[ord(base)] = value
+q4_lut = np.array([Q4(i) for i in range(256)], dtype=np.uint8)
 
 
 def find_delimiters(identifier):
@@ -80,7 +84,9 @@ def get_reads_num_per_block(fastq_path, block_size):
             read_length = len(first_record.seq)
         except StopIteration:
             return 0, 0
-    bytes_per_read = read_length * 2 if read_length else 1
+    bytes_per_read = read_length * 2
+    if bytes_per_read == 0:
+        bytes_per_read = 1
     reads_per_block = block_size // bytes_per_read if block_size else 1
     if reads_per_block <= 0:
         reads_per_block = 1
@@ -124,23 +130,35 @@ def generate_q_prime(Q, rules_dict_q):
     return Q_prime
 
 
-def process_records(records, rules_dict, rules_dict_q):
-    id_block, base_image_block, quality_block = [], [], []
-    for record in records:
+def process_records(records_iter, record_count, read_length, rules_dict, rules_dict_q):
+    id_block = []
+    base_block = np.empty((record_count, read_length), dtype=np.uint8)
+    quality_block = np.empty((record_count, read_length), dtype=np.uint8)
+
+    row = 0
+    for record in records_iter:
         id_str = record.description
         delimiters = find_delimiters(id_str)
         tokens = split_identifier(id_str, delimiters)
         regex = generate_regex(delimiters)
         id_block.append((tokens, regex))
-        base_gray_values = [base_to_gray.get(base, 0) for base in record.seq]
-        base_image_block.append(base_gray_values)
-        quality_gray_values = [Q4(q) for q in record.letter_annotations["phred_quality"]]
-        quality_block.append(quality_gray_values)
 
-    if not base_image_block:
+        seq_bytes = bytes(record.seq)
+        base_row = base_gray_lut[np.frombuffer(seq_bytes, dtype=np.uint8)]
+        base_block[row].fill(0)
+        base_block[row, :min(base_row.size, read_length)] = base_row[:read_length]
+
+        qualities = record.letter_annotations["phred_quality"]
+        quality_row = q4_lut[np.fromiter(qualities, dtype=np.uint8)]
+        quality_block[row].fill(0)
+        quality_block[row, :min(quality_row.size, read_length)] = quality_row[:read_length]
+
+        row += 1
+
+    if row == 0:
         return None, None, None
-    g_prime = generate_g_prime(np.array(base_image_block, dtype=np.uint8), rules_dict)
-    q_prime = generate_q_prime(np.array(quality_block, dtype=np.uint8), rules_dict_q)
+    g_prime = generate_g_prime(base_block[:row], rules_dict)
+    q_prime = generate_q_prime(quality_block[:row], rules_dict_q)
     g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
     q_prime_img = Image.fromarray(q_prime.astype(np.uint8))
     return g_prime_img, q_prime_img, id_block
@@ -240,26 +258,30 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
     return block_count
 
 
-def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq8_path, save):
-    records = []
+def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq8_path, save, record_count):
     try:
         gc.collect()
         with open(temp_chunk_path, 'r') as f:
-            records = list(SeqIO.parse(f, "fastq"))
-        if not records:
-            return block_count
+            parser = SeqIO.parse(f, "fastq")
+            try:
+                first_record = next(parser)
+            except StopIteration:
+                return block_count
 
-        rules_dict = init_rules_dict()
-        rules_dict_q = init_rules_dict_q()
-        g_block, q_block, id_block = process_records(records, rules_dict, rules_dict_q)
-        del records, rules_dict, rules_dict_q
-        gc.collect()
+            read_length = len(first_record.seq)
+            rules_dict = init_rules_dict()
+            rules_dict_q = init_rules_dict_q()
+            g_block, q_block, id_block = process_records(
+                chain([first_record], parser), record_count, read_length, rules_dict, rules_dict_q
+            )
+            del rules_dict, rules_dict_q
+            gc.collect()
 
-        if g_block is None:
-            return block_count
-        if save:
-            save_intermediate_files(g_block, q_block, id_block, output_path, block_count)
-        back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, save, block_count)
+            if g_block is None:
+                return block_count
+            if save:
+                save_intermediate_files(g_block, q_block, id_block, output_path, block_count)
+            back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, save, block_count)
     finally:
         if os.path.exists(temp_chunk_path):
             try:
@@ -301,36 +323,48 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
     temp_chunk_dir = os.path.join(out_dir, "temp_chunks")
     os.makedirs(temp_chunk_dir, exist_ok=True)
 
-    records, read_count_per_block, block_count = [], 0, 1
+    read_count_per_block, block_count = 0, 1
     with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
         results = []
         errors = []
         tqdm.write("info：正在读取 FASTQ 并分发任务...")
 
-        with open(fastq_path, 'r') as file:
-            for record in tqdm(SeqIO.parse(file, "fastq"), desc="Chunking", total=total_reads, unit="reads"):
-                records.append(record)
-                read_count_per_block += 1
-                if read_count_per_block >= reads_per_block:
-                    temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
-                    SeqIO.write(records, temp_chunk_path, "fastq")
-                    res = pool.apply_async(process_block_task_from_file,
-                                           (temp_chunk_path, block_count, output_path, lpaq8_path, save))
-                    results.append(res)
-                    if len(results) > max_workers * 2:
-                        results = [r for r in results if not r.ready()]
-                        if len(results) > max_workers * 3:
-                            time.sleep(1)
-                    records, read_count_per_block = [], 0
-                    block_count += 1
-            if records:
-                temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
-                SeqIO.write(records, temp_chunk_path, "fastq")
-                res = pool.apply_async(process_block_task_from_file,
-                                       (temp_chunk_path, block_count, output_path, lpaq8_path, save))
-                results.append(res)
-            else:
-                block_count -= 1
+        temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
+        temp_handle = open(temp_chunk_path, 'w')
+
+        def dispatch_current_chunk(path, count, record_total):
+            temp_handle.close()
+            res = pool.apply_async(
+                process_block_task_from_file,
+                (path, count, output_path, lpaq8_path, save, record_total)
+            )
+            results.append(res)
+
+        try:
+            with open(fastq_path, 'r') as file:
+                for record in tqdm(SeqIO.parse(file, "fastq"), desc="Chunking", total=total_reads, unit="reads"):
+                    SeqIO.write([record], temp_handle, "fastq")
+                    read_count_per_block += 1
+                    if read_count_per_block >= reads_per_block:
+                        dispatch_current_chunk(temp_chunk_path, block_count, read_count_per_block)
+                        if len(results) > max_workers * 2:
+                            results = [r for r in results if not r.ready()]
+                            if len(results) > max_workers * 3:
+                                time.sleep(1)
+                        block_count += 1
+                        temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
+                        temp_handle = open(temp_chunk_path, 'w')
+                        read_count_per_block = 0
+                if read_count_per_block > 0:
+                    dispatch_current_chunk(temp_chunk_path, block_count, read_count_per_block)
+                else:
+                    temp_handle.close()
+                    block_count -= 1
+        finally:
+            try:
+                temp_handle.close()
+            except Exception:
+                pass
 
         pool.close()
         tqdm.write("info：等待所有子进程完成...")
