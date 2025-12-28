@@ -127,6 +127,7 @@ def decompress_and_collect_metrics(input_file: Path, output_dir: Path, decompres
 def main() -> None:
     input_dir = "/media/compress/新加卷/output/test_FastCA_thread"
     decompressed_dir = "/media/compress/新加卷/output/test_FastCA_thread_decompressed"
+    Path(input_dir).mkdir(parents=True, exist_ok=True)
     Path(decompressed_dir).mkdir(parents=True, exist_ok=True)
 
     csv_path = os.path.join(

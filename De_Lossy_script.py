@@ -111,6 +111,7 @@ def main():
     # 与压缩脚本一致：压缩输出目录
     input_dir = "/media/compress/新加卷/output/test_FastCA-Lossy"     # 解压的输入目录（= 压缩脚本的输出目录）
     decompressed_dir = "/media/compress/新加卷/output/test_FastCA-Lossy_decompressed"  # 解压后的FASTQ目录
+    Path(input_dir).mkdir(parents=True, exist_ok=True)
     os.makedirs(decompressed_dir, exist_ok=True)
 
     # 结果CSV
@@ -118,6 +119,7 @@ def main():
         input_dir,
         f"decompression_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     )
+    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
     csv_header = [
         "file_name",
         "compressed_size_mb",
