@@ -23,6 +23,8 @@ def monitor_process(process: subprocess.Popen) -> dict:
     cpu_percentages = []
     memory_usages = []
     max_total_memory = 0
+    # 在多进程解压场景下，RSS 会重复计算共享页，导致总量被放大。
+    # 使用 USS（Unique Set Size）估算每个进程独占内存，避免多进程下的重复计数。
     try:
         p = psutil.Process(process.pid)
         step_count = 0
@@ -34,9 +36,10 @@ def monitor_process(process: subprocess.Popen) -> dict:
                 mem_breakdown = defaultdict(float)
                 for proc in all_procs:
                     try:
-                        mem_info = proc.memory_info()
+                        # 优先使用 USS，无法获取时退回 RSS。
+                        mem_info = getattr(proc, "memory_full_info", proc.memory_info)()
+                        rss_mb = getattr(mem_info, "uss", mem_info.rss) / 1024 / 1024
                         name = proc.name()
-                        rss_mb = mem_info.rss / 1024 / 1024
                         total_rss += rss_mb
                         total_cpu += proc.cpu_percent()
                         if "python" in name.lower():
