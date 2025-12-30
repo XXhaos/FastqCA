@@ -527,8 +527,9 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
-            # 使用进程池并行处理后端解压，避免 GIL，同时让每个子进程在任务后退出以释放内存
-            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
+            # 使用线程池避免对大块二进制数据的多进程序列化复制，防止队列放大内存
+            from multiprocessing.pool import ThreadPool
+            with ThreadPool(processes=max_workers) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
