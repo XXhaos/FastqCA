@@ -16,6 +16,7 @@ from collections import defaultdict
 from itertools import product, chain
 from Bio import SeqIO
 import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 
 # 确保目录下有 lpaq8.py
 from lpaq8 import compress_file, decompress_file
@@ -523,16 +524,17 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
             # 使用进程池并行处理后端解压，避免 GIL 限制，同时由主进程按顺序落盘
-            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
+            # 线程池避免跨进程序列化大块数据，降低内存占用
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
 
                 def flush_ready_results():
                     nonlocal next_to_write
-                    while next_to_write in pending and pending[next_to_write].ready():
+                    while next_to_write in pending and pending[next_to_write].done():
                         try:
-                            temp_fastq_path = pending[next_to_write].get()
+                            temp_fastq_path = pending[next_to_write].result()
                         except Exception as exc:
                             errors.append(exc)
                         else:
@@ -559,9 +561,16 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
                     tqdm.write(f"正在处理块: {block_count}")
 
-                    pending[block_count] = pool.apply_async(
+                    pending[block_count] = pool.submit(
                         process_compressed_block,
-                        (output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save, block_count)
+                        output_path,
+                        lpaq8_path,
+                        id_regex_data,
+                        id_tokens_data,
+                        g_prime_data,
+                        quality_data,
+                        save,
+                        block_count,
                     )
                     block_count += 1
 
@@ -570,13 +579,10 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                         time.sleep(0.1)
                     flush_ready_results()
 
-                pool.close()
-                pool.join()
-
                 # 写入剩余结果
                 for idx in sorted(pending.keys()):
                     try:
-                        temp_fastq_path = pending[idx].get()
+                        temp_fastq_path = pending[idx].result()
                     except Exception as exc:
                         errors.append(exc)
                         continue
