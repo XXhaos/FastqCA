@@ -471,27 +471,56 @@ def reconstruct_base_and_quality(g_prime_img, quality_img):
 
 
 def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False, custom_path=None):
-    records = []
+    """流式写入 FASTQ，避免构造大列表/SeqRecord 造成内存峰值。"""
     target_fastq_path = custom_path if custom_path else (
         output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
+    )
+
+    # 预计算 LUT，减少循环开销
+    gray_to_char = {v: k for k, v in base_to_gray.items()}
+    base_lut = np.frombuffer(
+        bytes([ord(gray_to_char.get(i, 'N')) for i in range(256)]),
+        dtype=np.uint8
     )
 
     id_block = list(id_block)
     id_tokens = [item[0] for item in id_block]
     id_regex = [item[1] for item in id_block]
     ids = reconstruct_id(id_tokens, id_regex)
-    g_prime, quality = reconstruct_base_and_quality(g_prime_img, quality_img)
 
-    for i in range(len(ids)):
-        seq = Seq(g_prime[i])
-        record = SeqRecord(seq, id=ids[i], description="")
-        record.letter_annotations["phred_quality"] = quality[i]
-        records.append(record)
+    g_prime_array = np.array(g_prime_img, dtype=np.uint8)
+    quality_array = np.array(quality_img, dtype=np.uint8)
+    rows, cols = g_prime_array.shape
 
+    # 行递归重建，保持常数行缓冲，避免整块字符串常驻
+    rules_dict = defaultdict(int)
+    prev_row = np.zeros(cols, dtype=np.uint8)
     mode = 'w' if custom_path or is_first_block else 'a'
-    with open(target_fastq_path, mode) as output_handle:
-        SeqIO.write(records, output_handle, 'fastq')
+    with open(target_fastq_path, mode, buffering=1024 * 1024) as output_handle:
+        for i in range(rows):
+            de_row = np.empty(cols, dtype=np.uint8)
+            gp_row = g_prime_array[i]
+            q_row = quality_array[i]
+            for j in range(cols):
+                center = gp_row[j]
+                up = prev_row[j] if i != 0 else 0
+                left = de_row[j - 1] if j != 0 else 0
+                left_up = prev_row[j - 1] if i != 0 and j != 0 else 0
+                candidates = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
+                top_rule = max(candidates, key=lambda r: rules_dict[r])
+                de_row[j] = top_rule[3] if gp_row[j] == 1 else center
+                matched_rule = (up, left_up, left, de_row[j])
+                rules_dict[matched_rule] += 1
+            seq_bytes = base_lut[de_row].tobytes()
+            seq_str = seq_bytes.decode('ascii')
+            qual_bytes = (q_row // 2 + 33).astype(np.uint8).tobytes()
+            qual_str = qual_bytes.decode('ascii')
+            output_handle.write(f"@{ids[i]}\n{seq_str}\n+\n{qual_str}\n")
+            prev_row = de_row
 
+    # 显式释放大数组
+    del g_prime_array, quality_array, prev_row, base_lut, ids
+    gc.collect()
     return target_fastq_path
 
 
