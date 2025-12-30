@@ -574,10 +574,11 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                     if len(pending) > max_workers * 3:
                         time.sleep(0.1)
                     flush_ready_results()
-                    # 防止主进程一次性将所有分块排队，导致输入队列累积大块二进制数据占用内存
-                    while len(pending) >= max_workers * 2:
+                    # 防止主进程一次性将所有分块排队，导致输入队列累积大块二进制数据占用内存。
+                    # 将排队上限收紧到“等于并行度”，避免 4 线程下出现 8~12 个大块同时驻留内存。
+                    while len(pending) >= max_workers:
                         flush_ready_results()
-                        if len(pending) >= max_workers * 2:
+                        if len(pending) >= max_workers:
                             time.sleep(0.05)
                     # 主进程不再持有块数据，立刻触发GC降低占用
                     del id_regex_data, id_tokens_data, g_prime_data, quality_data
