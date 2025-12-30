@@ -16,7 +16,6 @@ from collections import defaultdict
 from itertools import product, chain
 from Bio import SeqIO
 import multiprocessing
-from concurrent.futures import ThreadPoolExecutor
 
 # 确保目录下有 lpaq8.py
 from lpaq8 import compress_file, decompress_file
@@ -365,6 +364,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
     temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_dec_{block_count}")
     temp_input_path, temp_output_path = f"{temp_prefix}_in", f"{temp_prefix}_out"
     id_regex, id_tokens, g_prime, quality = None, None, None, None
+    id_block = None
     temp_fastq_path = os.path.join(os.path.dirname(output_path), f"temp_dec_fastq_{block_count}.fastq")
 
     try:
@@ -416,7 +416,11 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
         if os.path.exists(temp_output_path): os.remove(temp_output_path)
 
-        reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=True, custom_path=temp_fastq_path)
+        if id_block is not None and g_prime is not None and quality is not None:
+            reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=True, custom_path=temp_fastq_path)
+        # 及时释放块内大对象，避免在主进程堆积
+        id_regex = id_tokens = id_block = g_prime = quality = None
+        gc.collect()
 
     return temp_fastq_path
 
@@ -523,18 +527,17 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
-            # 使用进程池并行处理后端解压，避免 GIL 限制，同时由主进程按顺序落盘
-            # 线程池避免跨进程序列化大块数据，降低内存占用
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            # 使用进程池并行处理后端解压，避免 GIL，同时让每个子进程在任务后退出以释放内存
+            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
 
                 def flush_ready_results():
                     nonlocal next_to_write
-                    while next_to_write in pending and pending[next_to_write].done():
+                    while next_to_write in pending and pending[next_to_write].ready():
                         try:
-                            temp_fastq_path = pending[next_to_write].result()
+                            temp_fastq_path = pending[next_to_write].get()
                         except Exception as exc:
                             errors.append(exc)
                         else:
@@ -561,28 +564,26 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
                     tqdm.write(f"正在处理块: {block_count}")
 
-                    pending[block_count] = pool.submit(
+                    pending[block_count] = pool.apply_async(
                         process_compressed_block,
-                        output_path,
-                        lpaq8_path,
-                        id_regex_data,
-                        id_tokens_data,
-                        g_prime_data,
-                        quality_data,
-                        save,
-                        block_count,
+                        (output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
+                         block_count)
                     )
                     block_count += 1
 
-                    # 控制队列长度并尽早回写完成的块
                     if len(pending) > max_workers * 3:
                         time.sleep(0.1)
                     flush_ready_results()
+                    # 主进程不再持有块数据，立刻触发GC降低占用
+                    del id_regex_data, id_tokens_data, g_prime_data, quality_data
+                    gc.collect()
 
-                # 写入剩余结果
+                pool.close()
+                pool.join()
+
                 for idx in sorted(pending.keys()):
                     try:
-                        temp_fastq_path = pending[idx].result()
+                        temp_fastq_path = pending[idx].get()
                     except Exception as exc:
                         errors.append(exc)
                         continue
