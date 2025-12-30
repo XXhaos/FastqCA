@@ -353,7 +353,7 @@ def decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path):
     process.wait()
 
 
-def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
+def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_path, g_prime_path, quality_path, save,
                              block_count):
     back_compress_dir = os.path.join(os.path.dirname(output_path), "back_compressed")
     front_compress_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
@@ -369,8 +369,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
 
     try:
         # 1. ID Regex
-        with open(temp_input_path, "wb") as f:
-            f.write(id_regex_data)
+        shutil.copyfile(id_regex_path, temp_input_path)
         with open(temp_output_path, "w+") as f:
             decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
             f.seek(0)
@@ -380,8 +379,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
             shutil.copy(temp_output_path, os.path.join(front_compress_dir, f"chunk_{block_count}_id_regex.txt"))
 
         # 2. ID Tokens
-        with open(temp_input_path, "wb") as f:
-            f.write(id_tokens_data)
+        shutil.copyfile(id_tokens_path, temp_input_path)
         with open(temp_output_path, "w+") as f:
             decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
             f.seek(0)
@@ -393,8 +391,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         id_block = zip(id_tokens, id_regex)
 
         # 3. Quality
-        with open(temp_input_path, "wb") as f:
-            f.write(quality_data)
+        shutil.copyfile(quality_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
         with Image.open(temp_output_path) as img:
             quality = img.copy()
@@ -403,8 +400,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
             shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
 
         # 4. G Prime
-        with open(temp_input_path, "wb") as f:
-            f.write(g_prime_data)
+        shutil.copyfile(g_prime_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
         with Image.open(temp_output_path) as img:
             g_prime = img.copy()
@@ -415,6 +411,13 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
     finally:
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
         if os.path.exists(temp_output_path): os.remove(temp_output_path)
+        # 清理分块缓存文件，避免磁盘和内存堆积
+        for chunk_path in (id_regex_path, id_tokens_path, g_prime_path, quality_path):
+            try:
+                if os.path.exists(chunk_path):
+                    os.remove(chunk_path)
+            except Exception:
+                pass
 
         if id_block is not None and g_prime is not None and quality is not None:
             reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=True, custom_path=temp_fastq_path)
@@ -527,12 +530,13 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
-            # 使用线程池避免对大块二进制数据的多进程序列化复制，防止队列放大内存
-            from multiprocessing.pool import ThreadPool
-            with ThreadPool(processes=max_workers) as pool:
+            # 使用进程池保证每个块在独立进程中处理，内存可在子进程退出时被OS回收；参数传递仅用磁盘路径避免巨型对象序列化
+            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
+                chunk_dir = os.path.join(os.path.dirname(output_path), "temp_dec_chunks")
+                os.makedirs(chunk_dir, exist_ok=True)
 
                 def flush_ready_results():
                     nonlocal next_to_write
@@ -563,11 +567,23 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                     g_prime_data = read_chunk_safe(mm, base_tag)
                     quality_data = read_chunk_safe(mm, quality_tag)
 
+                    # 将大块数据落盘，仅传递路径给子进程，避免 pickling 大对象
+                    def dump_chunk(tag, data):
+                        path = os.path.join(chunk_dir, f"chunk_{block_count}_{tag}.bin")
+                        with open(path, "wb") as fh:
+                            fh.write(data)
+                        return path
+
+                    id_regex_path = dump_chunk("id_regex", id_regex_data)
+                    id_tokens_path = dump_chunk("id_tokens", id_tokens_data)
+                    g_prime_path = dump_chunk("g_prime", g_prime_data)
+                    quality_path = dump_chunk("quality", quality_data)
+
                     tqdm.write(f"正在处理块: {block_count}")
 
                     pending[block_count] = pool.apply_async(
                         process_compressed_block,
-                        (output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
+                        (output_path, lpaq8_path, id_regex_path, id_tokens_path, g_prime_path, quality_path, save,
                          block_count)
                     )
                     block_count += 1
@@ -601,6 +617,10 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
                 if errors:
                     raise RuntimeError(f"检测到 {len(errors)} 个解压块处理失败: {errors}")
+                try:
+                    shutil.rmtree(chunk_dir)
+                except Exception:
+                    pass
 
 
 def get_output_path(input_path, output_path):
@@ -620,7 +640,7 @@ def delete_temp_files(output_path):
                 os.remove(os.path.join(temp_dir, f))
             except:
                 pass
-    for folder in ["back_compressed", "front_compressed", "temp_chunks"]:
+    for folder in ["back_compressed", "front_compressed", "temp_chunks", "temp_dec_chunks"]:
         p = os.path.join(temp_dir, folder)
         if os.path.exists(p):
             try:
