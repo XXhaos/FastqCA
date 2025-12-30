@@ -531,7 +531,9 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
             # 使用进程池保证每个块在独立进程中处理，内存可在子进程退出时被OS回收；参数传递仅用磁盘路径避免巨型对象序列化
-            with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
+            # 大块（700MB+）解压会瞬时产生 GB 级中间对象，硬限制并发为最多 2，防止主机内存暴涨
+            pool_workers = max(1, min(max_workers, 2))
+            with multiprocessing.Pool(processes=pool_workers, maxtasksperchild=1) as pool:
                 pending = {}
                 next_to_write = 1
                 errors = []
