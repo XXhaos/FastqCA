@@ -349,10 +349,11 @@ def monitor(process, temp_input_path, temp_output_path):
 
 def decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path):
     process = decompress_file(temp_input_path, temp_output_path, lpaq8_path)
-    monitor(process, temp_input_path, temp_output_path)
+    # 直接等待子进程结束，避免 monitor 轮询带来的额外阻塞
+    process.wait()
 
 
-def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
+def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_path, g_prime_path, quality_path, save,
                              block_count):
     back_compress_dir = os.path.join(os.path.dirname(output_path), "back_compressed")
     front_compress_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
@@ -363,11 +364,12 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
     temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_dec_{block_count}")
     temp_input_path, temp_output_path = f"{temp_prefix}_in", f"{temp_prefix}_out"
     id_regex, id_tokens, g_prime, quality = None, None, None, None
+    id_block = None
+    temp_fastq_path = os.path.join(os.path.dirname(output_path), f"temp_dec_fastq_{block_count}.fastq")
 
     try:
         # 1. ID Regex
-        with open(temp_input_path, "wb") as f:
-            f.write(id_regex_data)
+        shutil.copyfile(id_regex_path, temp_input_path)
         with open(temp_output_path, "w+") as f:
             decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
             f.seek(0)
@@ -377,8 +379,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
             shutil.copy(temp_output_path, os.path.join(front_compress_dir, f"chunk_{block_count}_id_regex.txt"))
 
         # 2. ID Tokens
-        with open(temp_input_path, "wb") as f:
-            f.write(id_tokens_data)
+        shutil.copyfile(id_tokens_path, temp_input_path)
         with open(temp_output_path, "w+") as f:
             decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
             f.seek(0)
@@ -390,8 +391,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         id_block = zip(id_tokens, id_regex)
 
         # 3. Quality
-        with open(temp_input_path, "wb") as f:
-            f.write(quality_data)
+        shutil.copyfile(quality_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
         with Image.open(temp_output_path) as img:
             quality = img.copy()
@@ -400,8 +400,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
             shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
 
         # 4. G Prime
-        with open(temp_input_path, "wb") as f:
-            f.write(g_prime_data)
+        shutil.copyfile(g_prime_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
         with Image.open(temp_output_path) as img:
             g_prime = img.copy()
@@ -412,8 +411,21 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
     finally:
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
         if os.path.exists(temp_output_path): os.remove(temp_output_path)
+        # 清理分块缓存文件，避免磁盘和内存堆积
+        for chunk_path in (id_regex_path, id_tokens_path, g_prime_path, quality_path):
+            try:
+                if os.path.exists(chunk_path):
+                    os.remove(chunk_path)
+            except Exception:
+                pass
 
-    return id_block, g_prime, quality
+        if id_block is not None and g_prime is not None and quality is not None:
+            reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=True, custom_path=temp_fastq_path)
+        # 及时释放块内大对象，避免在主进程堆积
+        id_regex = id_tokens = id_block = g_prime = quality = None
+        gc.collect()
+
+    return temp_fastq_path
 
 
 def reconstruct_id(tokens, regex):
@@ -458,26 +470,58 @@ def reconstruct_base_and_quality(g_prime_img, quality_img):
     return bases, qualities
 
 
-def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False):
-    records = []
-    final_fastq_path = output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
+def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False, custom_path=None):
+    """流式写入 FASTQ，避免构造大列表/SeqRecord 造成内存峰值。"""
+    target_fastq_path = custom_path if custom_path else (
+        output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
+    )
+
+    # 预计算 LUT，减少循环开销
+    gray_to_char = {v: k for k, v in base_to_gray.items()}
+    base_lut = np.frombuffer(
+        bytes([ord(gray_to_char.get(i, 'N')) for i in range(256)]),
+        dtype=np.uint8
+    )
 
     id_block = list(id_block)
     id_tokens = [item[0] for item in id_block]
     id_regex = [item[1] for item in id_block]
     ids = reconstruct_id(id_tokens, id_regex)
-    g_prime, quality = reconstruct_base_and_quality(g_prime_img, quality_img)
 
-    for i in range(len(ids)):
-        seq = Seq(g_prime[i])
-        record = SeqRecord(seq, id=ids[i], description="")
-        record.letter_annotations["phred_quality"] = quality[i]
-        records.append(record)
+    g_prime_array = np.array(g_prime_img, dtype=np.uint8)
+    quality_array = np.array(quality_img, dtype=np.uint8)
+    rows, cols = g_prime_array.shape
 
-    # 首块使用写入模式覆盖旧文件，避免重复解压导致结果被追加
-    mode = 'w' if is_first_block else 'a'
-    with open(final_fastq_path, mode) as output_handle:
-        SeqIO.write(records, output_handle, 'fastq')
+    # 行递归重建，保持常数行缓冲，避免整块字符串常驻
+    rules_dict = defaultdict(int)
+    prev_row = np.zeros(cols, dtype=np.uint8)
+    mode = 'w' if custom_path or is_first_block else 'a'
+    with open(target_fastq_path, mode, buffering=1024 * 1024) as output_handle:
+        for i in range(rows):
+            de_row = np.empty(cols, dtype=np.uint8)
+            gp_row = g_prime_array[i]
+            q_row = quality_array[i]
+            for j in range(cols):
+                center = gp_row[j]
+                up = prev_row[j] if i != 0 else 0
+                left = de_row[j - 1] if j != 0 else 0
+                left_up = prev_row[j - 1] if i != 0 and j != 0 else 0
+                candidates = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
+                top_rule = max(candidates, key=lambda r: rules_dict[r])
+                de_row[j] = top_rule[3] if gp_row[j] == 1 else center
+                matched_rule = (up, left_up, left, de_row[j])
+                rules_dict[matched_rule] += 1
+            seq_bytes = base_lut[de_row].tobytes()
+            seq_str = seq_bytes.decode('ascii')
+            qual_bytes = (q_row // 2 + 33).astype(np.uint8).tobytes()
+            qual_str = qual_bytes.decode('ascii')
+            output_handle.write(f"@{ids[i]}\n{seq_str}\n+\n{qual_str}\n")
+            prev_row = de_row
+
+    # 显式释放大数组
+    del g_prime_array, quality_array, prev_row, base_lut, ids
+    gc.collect()
+    return target_fastq_path
 
 
 def read_chunk_safe(mmap_obj, tag):
@@ -499,7 +543,7 @@ def read_chunk_safe(mmap_obj, tag):
     return data
 
 
-def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
+def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_workers):
     output_path = get_output_path(compressed_path, output_path)
     # 标记符定义
     id_regex_tag = b"%id_regex%"
@@ -509,37 +553,105 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
     eof_tag = b"%eof"
 
     block_count = 1
+    final_fastq_path = output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
     with open(compressed_path, "r+b") as input_file:
         if os.path.getsize(compressed_path) == 0: return
 
-        # 使用mmap防止OOM
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            tqdm.write("info：开始解压 (安全长度模式)...")
+            tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
+            # 使用进程池保证每个块在独立进程中处理，内存可在子进程退出时被OS回收；参数传递仅用磁盘路径避免巨型对象序列化
+            # 大块（700MB+）解压会瞬时产生 GB 级中间对象，硬限制并发为最多 2，防止主机内存暴涨
+            pool_workers = max(1, min(max_workers, 2))
+            with multiprocessing.Pool(processes=pool_workers, maxtasksperchild=1) as pool:
+                pending = {}
+                next_to_write = 1
+                errors = []
+                chunk_dir = os.path.join(os.path.dirname(output_path), "temp_dec_chunks")
+                os.makedirs(chunk_dir, exist_ok=True)
 
-            while True:
-                # 如果后续仅剩EOF标记，则结束
-                remaining = mm.size() - mm.tell()
-                if remaining == len(eof_tag):
-                    tail = mm.read(len(eof_tag))
-                    if tail != eof_tag:
-                        raise RuntimeError("解压结束时未发现EOF标记，压缩文件可能损坏")
-                    tqdm.write("info：检测到EOF，解压结束。")
-                    break
+                def flush_ready_results():
+                    nonlocal next_to_write
+                    while next_to_write in pending and pending[next_to_write].ready():
+                        try:
+                            temp_fastq_path = pending[next_to_write].get()
+                        except Exception as exc:
+                            errors.append(exc)
+                        else:
+                            mode = 'w' if next_to_write == 1 else 'a'
+                            with open(temp_fastq_path, 'r') as src, open(final_fastq_path, mode) as dst:
+                                shutil.copyfileobj(src, dst)
+                            os.remove(temp_fastq_path)
+                        del pending[next_to_write]
+                        next_to_write += 1
 
-                # 依次读取四个块，严格依赖长度头
-                id_regex_data = read_chunk_safe(mm, id_regex_tag)
-                id_tokens_data = read_chunk_safe(mm, id_tokens_tag)
-                g_prime_data = read_chunk_safe(mm, base_tag)
-                quality_data = read_chunk_safe(mm, quality_tag)
+                while True:
+                    remaining = mm.size() - mm.tell()
+                    if remaining == len(eof_tag):
+                        tail = mm.read(len(eof_tag))
+                        if tail != eof_tag:
+                            raise RuntimeError("解压结束时未发现EOF标记，压缩文件可能损坏")
+                        tqdm.write("info：检测到EOF，解压结束。")
+                        break
 
-                tqdm.write(f"正在处理块: {block_count}")
+                    id_regex_data = read_chunk_safe(mm, id_regex_tag)
+                    id_tokens_data = read_chunk_safe(mm, id_tokens_tag)
+                    g_prime_data = read_chunk_safe(mm, base_tag)
+                    quality_data = read_chunk_safe(mm, quality_tag)
 
-                id_block, g_prime, quality = process_compressed_block(
-                    output_path, lpaq8_path, id_regex_data, id_tokens_data,
-                    g_prime_data, quality_data, save, block_count
-                )
-                reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=(block_count == 1))
-                block_count += 1
+                    # 将大块数据落盘，仅传递路径给子进程，避免 pickling 大对象
+                    def dump_chunk(tag, data):
+                        path = os.path.join(chunk_dir, f"chunk_{block_count}_{tag}.bin")
+                        with open(path, "wb") as fh:
+                            fh.write(data)
+                        return path
+
+                    id_regex_path = dump_chunk("id_regex", id_regex_data)
+                    id_tokens_path = dump_chunk("id_tokens", id_tokens_data)
+                    g_prime_path = dump_chunk("g_prime", g_prime_data)
+                    quality_path = dump_chunk("quality", quality_data)
+
+                    tqdm.write(f"正在处理块: {block_count}")
+
+                    pending[block_count] = pool.apply_async(
+                        process_compressed_block,
+                        (output_path, lpaq8_path, id_regex_path, id_tokens_path, g_prime_path, quality_path, save,
+                         block_count)
+                    )
+                    block_count += 1
+
+                    if len(pending) > max_workers * 3:
+                        time.sleep(0.1)
+                    flush_ready_results()
+                    # 防止主进程一次性将所有分块排队，导致输入队列累积大块二进制数据占用内存。
+                    # 将排队上限收紧到“等于并行度”，避免 4 线程下出现 8~12 个大块同时驻留内存。
+                    while len(pending) >= max_workers:
+                        flush_ready_results()
+                        if len(pending) >= max_workers:
+                            time.sleep(0.05)
+                    # 主进程不再持有块数据，立刻触发GC降低占用
+                    del id_regex_data, id_tokens_data, g_prime_data, quality_data
+                    gc.collect()
+
+                pool.close()
+                pool.join()
+
+                for idx in sorted(pending.keys()):
+                    try:
+                        temp_fastq_path = pending[idx].get()
+                    except Exception as exc:
+                        errors.append(exc)
+                        continue
+                    mode = 'w' if idx == 1 else 'a'
+                    with open(temp_fastq_path, 'r') as src, open(final_fastq_path, mode) as dst:
+                        shutil.copyfileobj(src, dst)
+                    os.remove(temp_fastq_path)
+
+                if errors:
+                    raise RuntimeError(f"检测到 {len(errors)} 个解压块处理失败: {errors}")
+                try:
+                    shutil.rmtree(chunk_dir)
+                except Exception:
+                    pass
 
 
 def get_output_path(input_path, output_path):
@@ -559,7 +671,7 @@ def delete_temp_files(output_path):
                 os.remove(os.path.join(temp_dir, f))
             except:
                 pass
-    for folder in ["back_compressed", "front_compressed", "temp_chunks"]:
+    for folder in ["back_compressed", "front_compressed", "temp_chunks", "temp_dec_chunks"]:
         p = os.path.join(temp_dir, folder)
         if os.path.exists(p):
             try:
@@ -584,7 +696,7 @@ def main():
         compress_multithread(args.input_path, args.output_path, lpaq8_path, save_flag, args.block_size, args.threads)
         if not save_flag: delete_temp_files(args.output_path)
     elif args.mode in ['decompress', 'd']:
-        decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+        decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None, args.threads)
         if not save_flag: delete_temp_files(args.output_path)
     else:
         print("Unknown mode")

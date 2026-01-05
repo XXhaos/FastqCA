@@ -64,9 +64,8 @@ def main() -> None:
 
     if args.compressor in LOSSY_COMMANDS:
         archive_path = lossy_output_path(args.input_path, args.output_path)
-        manifest_path = args.manifest or f"{archive_path}.readcount"
-
         if args.mode in ["compress", "c"]:
+            manifest_path = args.manifest or f"{archive_path}.readcount"
             read_count = count_reads(args.input_path)
             lossy_compress(
                 args.input_path,
@@ -80,8 +79,19 @@ def main() -> None:
             if not save_flag:
                 lossy_cleanup(args.output_path)
         elif args.mode in ["decompress", "d"]:
-            lossy_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
-            restored_path = lossy_output_path(args.input_path, args.output_path)
+            manifest_path = args.manifest or f"{args.input_path}.readcount"
+            lossy_decompress(
+                args.input_path,
+                args.output_path,
+                lpaq8_path,
+                save_flag,
+                None,
+                args.threads,
+            )
+            restored_base = lossy_output_path(args.input_path, args.output_path)
+            restored_path = (
+                restored_base if restored_base.endswith(".fastq") else f"{restored_base}.fastq"
+            )
             restored_reads = count_reads(restored_path)
             expected_reads = read_manifest(manifest_path)
             if expected_reads is not None and restored_reads != expected_reads:
@@ -106,7 +116,14 @@ def main() -> None:
             if not save_flag:
                 lossless_cleanup(args.output_path)
         elif args.mode in ["decompress", "d"]:
-            lossless_decompress(args.input_path, args.output_path, lpaq8_path, save_flag, None)
+            lossless_decompress(
+                args.input_path,
+                args.output_path,
+                lpaq8_path,
+                save_flag,
+                None,
+                args.threads,
+            )
             if not save_flag:
                 lossless_cleanup(args.output_path)
         else:
