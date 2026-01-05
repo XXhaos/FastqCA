@@ -72,7 +72,7 @@ python main_new.py \
 `main.sh` shows a sample lossless invocation you can adapt for quick testing:
 
 ```bash
-python main_new.py --compressor "Lossless" --input_path "input/SRR554369.fastq" --output_path "output" --mode "c"
+python main_new.py --compressor "Lossless" --input_path "input.fastq" --output_path "output" --mode "c"
 ```
 
 ## Notes
