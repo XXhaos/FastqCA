@@ -139,10 +139,27 @@ def process_records(records, rules_dict, rules_dict_q):
 
     if not base_image_block:
         return None, None, None
-    g_prime = generate_g_prime(np.array(base_image_block, dtype=np.uint8), rules_dict)
-    q_prime = generate_q_prime(np.array(quality_block, dtype=np.uint8), rules_dict_q)
+
+    # 使用dtype参数避免额外的内存拷贝
+    base_array = np.array(base_image_block, dtype=np.uint8)
+    quality_array = np.array(quality_block, dtype=np.uint8)
+
+    # 清空临时列表释放内存
+    base_image_block.clear()
+    quality_block.clear()
+
+    g_prime = generate_g_prime(base_array, rules_dict)
+    q_prime = generate_q_prime(quality_array, rules_dict_q)
+
+    # 释放中间数组
+    del base_array, quality_array
+
     g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
     q_prime_img = Image.fromarray(q_prime.astype(np.uint8))
+
+    # 释放g_prime和q_prime数组
+    del g_prime, q_prime
+
     return g_prime_img, q_prime_img, id_block
 
 
@@ -242,6 +259,9 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
 
 def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq8_path, save):
     records = []
+    g_block = None
+    q_block = None
+    id_block = None
     try:
         gc.collect()
         with open(temp_chunk_path, 'r') as f:
@@ -252,6 +272,9 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
         rules_dict = init_rules_dict()
         rules_dict_q = init_rules_dict_q()
         g_block, q_block, id_block = process_records(records, rules_dict, rules_dict_q)
+
+        # 立即清理不再需要的对象
+        records.clear()
         del records, rules_dict, rules_dict_q
         gc.collect()
 
@@ -260,12 +283,22 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
         if save:
             save_intermediate_files(g_block, q_block, id_block, output_path, block_count)
         back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, save, block_count)
+
+        # 清理压缩后的对象
+        del g_block, q_block, id_block
     finally:
         if os.path.exists(temp_chunk_path):
             try:
                 os.remove(temp_chunk_path)
             except Exception:
                 pass
+        # 确保清理所有局部对象
+        if 'g_block' in locals():
+            del g_block
+        if 'q_block' in locals():
+            del q_block
+        if 'id_block' in locals():
+            del id_block
         gc.collect()
     return block_count
 
@@ -313,7 +346,13 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
                 read_count_per_block += 1
                 if read_count_per_block >= reads_per_block:
                     temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
-                    SeqIO.write(records, temp_chunk_path, "fastq")
+                    # 使用流式写入减少内存峰值
+                    with open(temp_chunk_path, 'w') as chunk_file:
+                        SeqIO.write(records, chunk_file, "fastq")
+                    # 立即清空records列表并释放内存
+                    records.clear()
+                    gc.collect()
+
                     res = pool.apply_async(process_block_task_from_file,
                                            (temp_chunk_path, block_count, output_path, lpaq8_path, save))
                     results.append(res)
@@ -321,11 +360,14 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
                         results = [r for r in results if not r.ready()]
                         if len(results) > max_workers * 3:
                             time.sleep(1)
-                    records, read_count_per_block = [], 0
+                    read_count_per_block = 0
                     block_count += 1
             if records:
                 temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
-                SeqIO.write(records, temp_chunk_path, "fastq")
+                with open(temp_chunk_path, 'w') as chunk_file:
+                    SeqIO.write(records, chunk_file, "fastq")
+                records.clear()
+                gc.collect()
                 res = pool.apply_async(process_block_task_from_file,
                                        (temp_chunk_path, block_count, output_path, lpaq8_path, save))
                 results.append(res)
