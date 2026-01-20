@@ -257,18 +257,26 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
 
 
 def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq8_path, save):
-    records = []
     try:
+        # 先强制垃圾回收，清理之前块的内存
+        import gc
         gc.collect()
+
+        # 读取 records - 这是最大的内存消耗点（~373MB）
         with open(temp_chunk_path, 'r') as f:
             records = list(SeqIO.parse(f, "fastq"))
+
         if not records:
             return block_count
 
+        # 处理 records
         rules_dict = init_rules_dict()
         rules_dict_q = init_rules_dict_q()
         g_block, q_block, id_block = process_records(records, rules_dict, rules_dict_q)
-        del records, rules_dict, rules_dict_q
+
+        # 立即删除 records 列表以释放 ~373MB 内存
+        del records
+        del rules_dict, rules_dict_q
         gc.collect()
 
         if g_block is None:
