@@ -130,9 +130,17 @@ def generate_g_prime(G, rules_dict, p_bar, gr_bar):
 # 对records做压缩
 def process_records(records, rules_dict, p_bar, gr_bar):
     # 对原始数据进行处理
+    num_records = len(records)
+    if num_records == 0:
+        return None, None, []
+
+    # 获取序列长度
+    seq_length = len(records[0].seq)
+
+    # 预分配 NumPy 数组而不是使用列表，可以减少内存消耗
+    base_image_block = np.zeros((num_records, seq_length), dtype=np.uint8)
+    quality_block = np.zeros((num_records, seq_length), dtype=np.uint8)
     id_block = []
-    base_image_block = []
-    quality_block = []
 
     start_time = time.time()
 
@@ -144,26 +152,21 @@ def process_records(records, rules_dict, p_bar, gr_bar):
         regex = generate_regex(delimiters)
         id_block.append((tokens, regex))
 
-        base_gray_values = [base_to_gray.get(base, 0) for base in record.seq]
-        base_image_block.append(base_gray_values)
+        # 直接填充到 NumPy 数组中，避免创建中间列表
+        for j, base in enumerate(record.seq):
+            base_image_block[i, j] = base_to_gray.get(base, 0)
 
-        quality_gray_values = [q * 2 for q in record.letter_annotations["phred_quality"]]
-        quality_block.append(quality_gray_values)
+        for j, q in enumerate(record.letter_annotations["phred_quality"]):
+            quality_block[i, j] = q * 2
 
         p_bar.update(0.1)
         if gr_bar:
             gr_bar.update(1)
-        # # 计算已经过去的平均时间
-        # elapsed_time = time.time() - start_time
-        # avg_time_per_iteration = elapsed_time / (i + 1)
-        # # 计算剩余时间
-        # remaining_iterations = len(records) - (i + 1)
-        # estimated_remaining_time = remaining_iterations * avg_time_per_iteration
-        # # 更新剩余时间信息
-        # p_bar.set_postfix(ETA=f"预计前端压缩剩余时间：{estimated_remaining_time:.1f}s")
 
-    g_prime = generate_g_prime(np.array(base_image_block, dtype=np.uint8), rules_dict, p_bar, gr_bar)
-    quality_block = np.array(quality_block, dtype=np.uint8)
+    g_prime = generate_g_prime(base_image_block, rules_dict, p_bar, gr_bar)
+
+    # 删除不再需要的 base_image_block 以释放内存
+    del base_image_block
 
     p_bar.update(p_bar.total * 0.5 - p_bar.n)
     if gr_bar:
@@ -413,6 +416,7 @@ def compress(fastq_path, output_path, lpaq8_path, save, gr_progress, block_size 
 
     tqdm.write(f"info：开始读取fastq文件，文件名：{os.path.splitext(os.path.basename(fastq_path))[0]}")
     # 使用 SeqIO.parse() 函数逐条读取 FASTQ 文件
+    import gc
     with open(fastq_path, 'r') as file:
         for record in SeqIO.parse(file, "fastq"):
             records.append(record)
@@ -432,9 +436,14 @@ def compress(fastq_path, output_path, lpaq8_path, save, gr_progress, block_size 
 
                     block_count += 1
                     read_count_per_block = 0
-                    records = []
+
+                    # 清空 records 列表并显式调用垃圾回收
+                    records.clear()
                     # 重置规则字典
                     rules_dict = init_rules_dict()
+
+                    # 显式调用垃圾回收以释放内存
+                    gc.collect()
 
     # 处理最后一个块（如果有剩余）
     if records:
@@ -444,6 +453,10 @@ def compress(fastq_path, output_path, lpaq8_path, save, gr_progress, block_size 
             process_block(records, rules_dict, block_count, output_path, lpaq8_path, save, p_bar, gr_bar)
             process_last_block(output_path)
             block_count += 1
+
+            # 清理资源
+            records.clear()
+            gc.collect()
 
 
 def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save, block_count):
@@ -479,33 +492,35 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
     try:
         # 处理 id_regex 数据块
         with open(temp_input_path_id_regex, "wb") as temp_input_file:
-            with open(temp_output_path_id_regex, "w+") as temp_output_file:
-                temp_input_file.write(id_regex_data)
-                temp_input_file.flush()
-                # 调用已有的解压缩函数
-                decompress_with_monitor(temp_input_path_id_regex, temp_output_path_id_regex, lpaq8_path, None, None, None)
-                id_regex = [line.strip() for line in temp_output_file.readlines()]
+            temp_input_file.write(id_regex_data)
+            temp_input_file.flush()
 
-                if save:
-                    shutil.copy(temp_input_path_id_regex, os.path.join(back_compress_dir, f"chunk_{block_count}_id_regex.lpaq8"))
-                    shutil.copy(temp_output_path_id_regex, os.path.join(front_compress_dir, f"chunk_{block_count}_id_regex.txt"))
+        decompress_with_monitor(temp_input_path_id_regex, temp_output_path_id_regex, lpaq8_path, None, None, None)
 
-                tqdm.write("id_regex处理完毕")
+        with open(temp_output_path_id_regex, "r") as temp_output_file:
+            id_regex = [line.strip() for line in temp_output_file.readlines()]
+
+        if save:
+            shutil.copy(temp_input_path_id_regex, os.path.join(back_compress_dir, f"chunk_{block_count}_id_regex.lpaq8"))
+            shutil.copy(temp_output_path_id_regex, os.path.join(front_compress_dir, f"chunk_{block_count}_id_regex.txt"))
+
+        tqdm.write("id_regex处理完毕")
 
         # 处理 id_tokens 数据块
         with open(temp_input_path_id_tokens, "wb") as temp_input_file:
-            with open(temp_output_path_id_tokens, "w+") as temp_output_file:
-                temp_input_file.write(id_tokens_data)
-                temp_input_file.flush()
-                # 调用已有的解压缩函数
-                decompress_with_monitor(temp_input_path_id_tokens, temp_output_path_id_tokens, lpaq8_path, None, None, None)
-                id_tokens = [line.strip() for line in temp_output_file.readlines()]
+            temp_input_file.write(id_tokens_data)
+            temp_input_file.flush()
 
-                if save:
-                    shutil.copy(temp_input_path_id_tokens, os.path.join(back_compress_dir, f"chunk_{block_count}_id_tokens.lpaq8"))
-                    shutil.copy(temp_output_path_id_tokens, os.path.join(front_compress_dir, f"chunk_{block_count}_id_tokens.txt"))
+        decompress_with_monitor(temp_input_path_id_tokens, temp_output_path_id_tokens, lpaq8_path, None, None, None)
 
-                tqdm.write("id_tokens处理完毕")
+        with open(temp_output_path_id_tokens, "r") as temp_output_file:
+            id_tokens = [line.strip() for line in temp_output_file.readlines()]
+
+        if save:
+            shutil.copy(temp_input_path_id_tokens, os.path.join(back_compress_dir, f"chunk_{block_count}_id_tokens.lpaq8"))
+            shutil.copy(temp_output_path_id_tokens, os.path.join(front_compress_dir, f"chunk_{block_count}_id_tokens.txt"))
+
+        tqdm.write("id_tokens处理完毕")
 
         id_block = zip(id_tokens, id_regex)
 
@@ -513,44 +528,54 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         with open(temp_input_path_quality, "wb") as temp_input_file:
             temp_input_file.write(quality_data)
             temp_input_file.flush()
-            # 调用已有的解压缩函数
-            decompress_with_monitor(temp_input_path_quality, temp_output_path_quality, lpaq8_path, None, None, None)
-            # 确保文件写入完成
-            try:
-                with Image.open(temp_output_path_quality) as img:
-                    quality = img.copy()
-            except UnidentifiedImageError:
-                tqdm.write(f"无法识别的图像文件: {temp_output_path_quality}")
-                raise
 
-            if save:
-                shutil.copy(temp_input_path_quality, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-                shutil.copy(temp_output_path_quality, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
+        decompress_with_monitor(temp_input_path_quality, temp_output_path_quality, lpaq8_path, None, None, None)
 
-            tqdm.write("quality处理完毕")
+        try:
+            with Image.open(temp_output_path_quality) as img:
+                quality = img.copy()
+        except UnidentifiedImageError:
+            tqdm.write(f"无法识别的图像文件: {temp_output_path_quality}")
+            raise
+
+        if save:
+            shutil.copy(temp_input_path_quality, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
+            shutil.copy(temp_output_path_quality, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
+
+        tqdm.write("quality处理完毕")
 
         # 处理 g_prime 数据块
         with open(temp_input_path_g_prime, "wb") as temp_input_file:
             temp_input_file.write(g_prime_data)
             temp_input_file.flush()
-            # 调用已有的解压缩函数
-            decompress_with_monitor(temp_input_path_g_prime, temp_output_path_g_prime, lpaq8_path, None, None, None)
-            # 确保文件写入完成
-            try:
-                with Image.open(temp_output_path_g_prime) as img:
-                    g_prime = img.copy()
-            except UnidentifiedImageError:
-                tqdm.write(f"无法识别的图像文件: {temp_output_path_g_prime}")
-                raise
 
-            if save:
-                shutil.copy(temp_input_path_g_prime, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-                shutil.copy(temp_output_path_g_prime, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
+        decompress_with_monitor(temp_input_path_g_prime, temp_output_path_g_prime, lpaq8_path, None, None, None)
 
-            tqdm.write("g_prime处理完毕")
+        try:
+            with Image.open(temp_output_path_g_prime) as img:
+                g_prime = img.copy()
+        except UnidentifiedImageError:
+            tqdm.write(f"无法识别的图像文件: {temp_output_path_g_prime}")
+            raise
+
+        if save:
+            shutil.copy(temp_input_path_g_prime, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
+            shutil.copy(temp_output_path_g_prime, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
+
+        tqdm.write("g_prime处理完毕")
 
     finally:
-        pass
+        # 清理临时文件以释放内存
+        for temp_file in [temp_input_path_id_regex, temp_output_path_id_regex,
+                         temp_input_path_id_tokens, temp_output_path_id_tokens,
+                         temp_input_path_quality, temp_output_path_quality,
+                         temp_input_path_g_prime, temp_output_path_g_prime]:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+
     return id_block, g_prime, quality
 
 
@@ -563,101 +588,114 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress):
     quality_seperator = b"%quality%"
     eof_seperator = b"%eof"
 
+    block_count = 1
+
+    # 使用内存映射或分块读取来避免一次性加载整个文件
+    import mmap
+
+    with open(compressed_path, "rb") as input_file:
+        # 获取文件大小
+        input_file.seek(0, 2)
+        file_size = input_file.tell()
+        input_file.seek(0)
+
+        # 如果文件太大，使用内存映射；否则直接读取
+        if file_size > 500 * 1024 * 1024:  # 如果文件大于500MB
+            # 使用内存映射，这样不会一次性加载整个文件到内存
+            with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mmapped_file:
+                content = mmapped_file
+                _decompress_content(content, output_path, lpaq8_path, save, block_count,
+                                   id_regex_seperator, id_tokens_seperator,
+                                   base_g_prime_seperator, quality_seperator, eof_seperator)
+        else:
+            # 小文件直接读取
+            content = input_file.read()
+            _decompress_content(content, output_path, lpaq8_path, save, block_count,
+                               id_regex_seperator, id_tokens_seperator,
+                               base_g_prime_seperator, quality_seperator, eof_seperator)
+
+
+def _decompress_content(content, output_path, lpaq8_path, save, block_count,
+                       id_regex_seperator, id_tokens_seperator,
+                       base_g_prime_seperator, quality_seperator, eof_seperator):
+    """Helper function to decompress content"""
     start = 0
     end = 0
 
-    block_count = 1
+    # 取id_regex
+    start = content.find(id_regex_seperator, end)
+    eof = content.find(eof_seperator, start)
 
-    id_regex_dat = None
-    id_tokens_data = None
-    g_prime_data = None
-    quality_data = None
+    if start == -1:
+        tqdm.write(f"错误：文件开始符缺失")
+        exit(1)
 
-    with open(compressed_path, "rb") as input_file:
-        content = input_file.read()
+    if eof == -1:
+        tqdm.write(f"错误：文件结束符缺失")
+        exit(1)
 
-        # 取id_regex
+    while True:
+        # 获取id_regex
         start = content.find(id_regex_seperator, end)
-        eof = content.find(eof_seperator, start)
-
+        end = content.find(id_tokens_seperator, start)
         if start == -1:
-            tqdm.write(f"错误：文件开始符缺失")
+            break
+        if end < start:
+            tqdm.write("错误：id_regex_seperator或id_tokens_seperator文件分隔符缺失")
+            exit(1)
+        id_regex_data = content[start + len(id_regex_seperator): end]
+
+        # 获取id_tokens
+        start = content.find(id_tokens_seperator, end)
+        end = content.find(base_g_prime_seperator, start)
+        if start == -1 or end < start:
+            tqdm.write("错误：id_tokens_seperator或base_g_prime_seperator文件分隔符缺失")
+            exit(1)
+        id_tokens_data = content[start + len(id_tokens_seperator): end]
+
+        # 获取g_prime
+        start = content.find(base_g_prime_seperator, end)
+        end = content.find(quality_seperator, start)
+        if start == -1 or end < start:
+            tqdm.write("错误：base_g_prime_seperator或quality_seperator文件分隔符缺失")
+            exit(1)
+        g_prime_data = content[start + len(base_g_prime_seperator): end]
+
+        # 获取quality
+        start = content.find(quality_seperator, end)
+        end = content.find(id_regex_seperator, start)
+
+        # 如果end = -1，说明已经到达文件尾
+        if end == -1:
+            end = eof
+
+        if start == -1 or end < start:
+            tqdm.write("错误：quality_seperator或id_regex_seperator文件分隔符缺失")
+            exit(1)
+        quality_data = content[start + len(quality_seperator): end]
+
+        if id_tokens_data is None or g_prime_data is None or quality_data is None or id_regex_data is None:
+            tqdm.write("错误：无法读取到id_regex_data或id_tokens_data或g_prime_data, quality_data")
             exit(1)
 
-        if eof == -1:
-            tqdm.write(f"错误：文件结束符缺失")
+        id_block, g_prime, quality = process_compressed_block(output_path, lpaq8_path, id_regex_data,
+                                                              id_tokens_data,
+                                                              g_prime_data, quality_data, save, block_count)
+
+        if id_block is None or g_prime is None or quality is None:
+            tqdm.write("错误：无法重建id_block, g_prime, quality")
             exit(1)
 
-        while True:
+        # 处理完一个块后，立即重建fastq并释放内存
+        reconstruct_fastq(output_path, id_block, g_prime, quality)
 
-            # 获取id_regex
-            start = content.find(id_regex_seperator, end)
-            end = content.find(id_tokens_seperator, start)
-            if start == -1:
-                break
-            if end < start:
-                tqdm.write("错误：id_regex_seperator或id_tokens_seperator文件分隔符缺失")
-                exit(1)
-            id_regex_data = content[start + len(id_regex_seperator): end]
+        # 显式删除大对象以释放内存
+        del id_regex_data, id_tokens_data, g_prime_data, quality_data
+        del id_block, g_prime, quality
+        import gc
+        gc.collect()
 
-            # 获取id_tokens
-            start = content.find(id_tokens_seperator, end)
-            end = content.find(base_g_prime_seperator, start)
-            if start == -1 or end < start:
-                tqdm.write("错误：id_tokens_seperator或base_g_prime_seperator文件分隔符缺失")
-                exit(1)
-            id_tokens_data = content[start + len(id_tokens_seperator): end]
-
-            # 获取g_prime
-            start = content.find(base_g_prime_seperator, end)
-            end = content.find(quality_seperator, start)
-            if start == -1 or end < start:
-                tqdm.write("错误：base_g_prime_seperator或quality_seperator文件分隔符缺失")
-                exit(1)
-            g_prime_data = content[start + len(base_g_prime_seperator): end]
-
-            # 获取quality
-            start = content.find(quality_seperator, end)
-            end = content.find(id_regex_seperator, start)
-
-            # 如果end = -1，说明已经到达文件尾
-            if end == -1:
-                end = eof
-
-            if start == -1 or end < start:
-                tqdm.write("错误：quality_seperator或id_regex_seperator文件分隔符缺失")
-                exit(1)
-            quality_data = content[start + len(quality_seperator): end]
-
-            if id_tokens_data is None or g_prime_data is None or quality_data is None or id_regex_data is None:
-                tqdm.write("错误：无法读取到id_regex_data或id_tokens_data或g_prime_data, quality_data")
-                exit(1)
-
-            id_block, g_prime, quality = process_compressed_block(output_path, lpaq8_path, id_regex_data,
-                                                                  id_tokens_data,
-                                                                  g_prime_data, quality_data, save, block_count)
-
-            if id_block is None or g_prime is None or quality is None:
-                tqdm.write("错误：无法重建id_block, g_prime, quality")
-                exit(1)
-
-            block_count += 1
-
-            # # 判断g_prime_data, quality_data是否相同
-            # if g_prime_data == quality_data:
-            #     print("错误：g_prime_data, quality_data相同")
-            #     exit(1)
-            # else:
-            #     print("g_prime_data, quality_data不同")
-            #
-            # # 判断g_prime, quality是否相同
-            # if g_prime == quality:
-            #     print("错误：g_prime, quality相同")
-            #     exit(1)
-            # else:
-            #     print("g_prime, quality不同")
-
-            reconstruct_fastq(output_path, id_block, g_prime, quality)
+        block_count += 1
 
 
 def load_id_block(id_block_path, regex_path):
