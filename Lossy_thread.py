@@ -125,22 +125,38 @@ def generate_q_prime(Q, rules_dict_q):
 
 
 def process_records(records, rules_dict, rules_dict_q):
-    id_block, base_image_block, quality_block = [], [], []
-    for record in records:
+    num_records = len(records)
+    if num_records == 0:
+        return None, None, None
+
+    # 获取序列长度
+    seq_length = len(records[0].seq)
+
+    # 预分配 NumPy 数组而不是使用列表，减少内存消耗
+    base_image_block = np.zeros((num_records, seq_length), dtype=np.uint8)
+    quality_block = np.zeros((num_records, seq_length), dtype=np.uint8)
+    id_block = []
+
+    for i, record in enumerate(records):
         id_str = record.description
         delimiters = find_delimiters(id_str)
         tokens = split_identifier(id_str, delimiters)
         regex = generate_regex(delimiters)
         id_block.append((tokens, regex))
-        base_gray_values = [base_to_gray.get(base, 0) for base in record.seq]
-        base_image_block.append(base_gray_values)
-        quality_gray_values = [Q4(q) for q in record.letter_annotations["phred_quality"]]
-        quality_block.append(quality_gray_values)
 
-    if not base_image_block:
-        return None, None, None
-    g_prime = generate_g_prime(np.array(base_image_block, dtype=np.uint8), rules_dict)
-    q_prime = generate_q_prime(np.array(quality_block, dtype=np.uint8), rules_dict_q)
+        # 直接填充到 NumPy 数组中，避免创建中间列表
+        for j, base in enumerate(record.seq):
+            base_image_block[i, j] = base_to_gray.get(base, 0)
+
+        for j, q in enumerate(record.letter_annotations["phred_quality"]):
+            quality_block[i, j] = Q4(q)
+
+    g_prime = generate_g_prime(base_image_block, rules_dict)
+    q_prime = generate_q_prime(quality_block, rules_dict_q)
+
+    # 删除不再需要的数组以释放内存
+    del base_image_block, quality_block
+
     g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
     q_prime_img = Image.fromarray(q_prime.astype(np.uint8))
     return g_prime_img, q_prime_img, id_block
@@ -321,14 +337,22 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
                         results = [r for r in results if not r.ready()]
                         if len(results) > max_workers * 3:
                             time.sleep(1)
-                    records, read_count_per_block = [], 0
+                    # 清空 records 列表并显式调用垃圾回收
+                    records.clear()
+                    read_count_per_block = 0
                     block_count += 1
+                    # 定期强制垃圾回收
+                    if block_count % 10 == 0:
+                        gc.collect()
             if records:
                 temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
                 SeqIO.write(records, temp_chunk_path, "fastq")
                 res = pool.apply_async(process_block_task_from_file,
                                        (temp_chunk_path, block_count, output_path, lpaq8_path, save))
                 results.append(res)
+                # 清理最后的 records
+                records.clear()
+                gc.collect()
             else:
                 block_count -= 1
 
