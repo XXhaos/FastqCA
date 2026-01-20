@@ -96,6 +96,7 @@ def compress_and_collect_metrics(input_file, output_dir):
         '--output_path', output_dir,
         '--mode', 'c',
         '--threads', THREAD_COUNT,
+        '--block_size', str(64 * 1024 * 1024),  # 减小到64MB
     ]
 
     print(f"Executing: {' '.join(cmd)}")
