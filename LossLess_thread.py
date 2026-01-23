@@ -8,7 +8,6 @@ import gc
 import mmap
 import struct  # 【新增】用于打包二进制长度数据
 from tqdm import tqdm
-from PIL import Image, UnidentifiedImageError
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import numpy as np
@@ -19,8 +18,6 @@ import multiprocessing
 
 # 确保目录下有 lpaq8.py
 from lpaq8 import compress_file, decompress_file
-
-Image.MAX_IMAGE_PIXELS = None
 
 base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
 gray_to_base = {32: 'A', 64: 'T', 192: 'G', 224: 'C', 0: 'N'}
@@ -118,16 +115,16 @@ def process_records(records_iter, record_count, read_length, rules_dict):
         return None, None, None
 
     g_prime = generate_g_prime(base_block[:row], rules_dict)
-    g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
-    quality_img = Image.fromarray(quality_block[:row].astype(np.uint8))
-    return g_prime_img, quality_img, id_block
+    # 直接返回 NumPy 数组，不转换为 PIL Image
+    return g_prime, quality_block[:row], id_block
 
 
 def save_intermediate_files(g_block, quality_block, id_block, output_path, block_count):
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
-    g_block.save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
-    quality_block.save(os.path.join(front_dir, f'chunk_{block_count}_quality.tiff'))
+    # g_block 和 quality_block 是 NumPy 数组，使用 np.save 保存
+    np.save(os.path.join(front_dir, f'chunk_{block_count}_base.npy'), g_block)
+    np.save(os.path.join(front_dir, f'chunk_{block_count}_quality.npy'), quality_block)
     with open(os.path.join(front_dir, f"chunk_{block_count}_id_tokens.txt"), 'w') as f1, \
             open(os.path.join(front_dir, f"chunk_{block_count}_id_regex.txt"), 'w') as f2:
         for tokens, regex in id_block:
@@ -172,6 +169,8 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
             write_safe_chunk(output_file, b"%id_regex%", data)
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_regex.lpaq8"), "wb") as sf: sf.write(data)
+            del data
+            gc.collect()
 
             # 2. ID Tokens
             with open(temp_input_path, "w") as f:
@@ -183,9 +182,14 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
             write_safe_chunk(output_file, b"%id_tokens%", data)
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf: sf.write(data)
+            del data
+            gc.collect()
 
-            # 3. Base
-            g_block.save(temp_input_path, format="tiff")
+            # 3. Base - 序列化处理，先压缩g_block再删除
+            np.save(temp_input_path, g_block)
+            del g_block  # 立即删除以释放内存
+            gc.collect()
+
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path): raise RuntimeError("LPAQ8 compression failed for Base")
             with open(temp_output_path, "rb") as f:
@@ -193,9 +197,14 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
             write_safe_chunk(output_file, b"%base_g_prime%", data)
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf: sf.write(data)
+            del data
+            gc.collect()
 
-            # 4. Quality
-            quality_block.save(temp_input_path, format="tiff")
+            # 4. Quality - 现在g_block已经被删除，只持有quality_block
+            np.save(temp_input_path, quality_block)
+            del quality_block  # 立即删除以释放内存
+            gc.collect()
+
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path): raise RuntimeError("LPAQ8 compression failed for Quality")
             with open(temp_output_path, "rb") as f:
@@ -203,6 +212,8 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
             write_safe_chunk(output_file, b"%quality%", data)
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_quality.lpaq8"), "wb") as sf: sf.write(data)
+            del data
+            gc.collect()
 
     finally:
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
@@ -393,20 +404,20 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_p
         # 3. Quality
         shutil.copyfile(quality_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        with Image.open(temp_output_path) as img:
-            quality = img.copy()
+        # 使用 np.load 加载 NumPy 数组
+        quality = np.load(temp_output_path, allow_pickle=False)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.npy'))
 
         # 4. G Prime
         shutil.copyfile(g_prime_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        with Image.open(temp_output_path) as img:
-            g_prime = img.copy()
+        # 使用 np.load 加载 NumPy 数组
+        g_prime = np.load(temp_output_path, allow_pickle=False)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.npy'))
 
     finally:
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
