@@ -233,6 +233,11 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
 
             # Base image - g_block 已经是 PIL Image 对象
             g_block.save(temp_input_path, format="tiff")
+            # 保存后立即删除 Image 对象，释放内存
+            del g_block
+            import gc
+            gc.collect()
+
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Base")
@@ -242,9 +247,15 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf:
                     sf.write(data)
+            # 删除压缩后的数据
+            del data
+            gc.collect()
 
             # Quality image - q_block 已经是 PIL Image 对象
             q_block.save(temp_input_path, format="tiff")
+            # 保存后立即删除 Image 对象
+            del q_block
+            gc.collect()
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Quality")
@@ -289,13 +300,21 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
             return block_count
         if save:
             save_intermediate_files(g_block, q_block, id_block, output_path, block_count)
+
+        # 后端压缩
         back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, save, block_count)
+
+        # 压缩完成后，立即释放所有数据
+        del g_block, q_block, id_block
+        gc.collect()
+
     finally:
         if os.path.exists(temp_chunk_path):
             try:
                 os.remove(temp_chunk_path)
             except Exception:
                 pass
+        # 最后再次强制垃圾回收
         gc.collect()
     return block_count
 
