@@ -507,9 +507,7 @@ def compress(fastq_path, output_path, lpaq8_path, save, gr_progress, block_size 
 
                     # 清空 records 列表并显式调用垃圾回收
                     records.clear()
-                    # 重置规则字典
-                    rules_dict = init_rules_dict()
-                    rules_dict_q = init_rules_dict_q()
+                    # 注意：rules_dict 不能重置！所有块共用同一个 rules_dict 以提高预测准确率
 
                     # 显式调用垃圾回收以释放内存
                     gc.collect()
