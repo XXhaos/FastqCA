@@ -8,7 +8,6 @@ import gc
 import mmap
 import struct
 from tqdm import tqdm
-from PIL import Image, UnidentifiedImageError
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import numpy as np
@@ -18,8 +17,6 @@ from Bio import SeqIO
 import multiprocessing
 
 from lpaq8 import compress_file, decompress_file
-
-Image.MAX_IMAGE_PIXELS = None
 
 # 映射表
 base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
@@ -157,22 +154,17 @@ def process_records(records, rules_dict, rules_dict_q):
     # 删除不再需要的数组以释放内存
     del base_image_block, quality_block
 
-    # 转换为 PIL Image 对象
-    g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
-    q_prime_img = Image.fromarray(q_prime.astype(np.uint8))
-
-    # 删除 NumPy 数组，只保留 Image 对象
-    del g_prime, q_prime
-
-    return g_prime_img, q_prime_img, id_block
+    # 直接返回 NumPy 数组，不转换为 PIL Image
+    # 这样避免了 Image 对象的内存开销 (~30-50MB per image)
+    return g_prime, q_prime, id_block
 
 
 def save_intermediate_files(g_block, q_block, id_block, output_path, block_count):
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
-    # g_block 和 q_block 已经是 PIL Image 对象
-    g_block.save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
-    q_block.save(os.path.join(front_dir, f'chunk_{block_count}_quality.tiff'))
+    # g_block 和 q_block 是 NumPy 数组，使用 np.save 保存（比 TIFF 更快且不消耗额外内存）
+    np.save(os.path.join(front_dir, f'chunk_{block_count}_base.npy'), g_block)
+    np.save(os.path.join(front_dir, f'chunk_{block_count}_quality.npy'), q_block)
     with open(os.path.join(front_dir, f"chunk_{block_count}_id_tokens.txt"), 'w') as f1, \
             open(os.path.join(front_dir, f"chunk_{block_count}_id_regex.txt"), 'w') as f2:
         for tokens, regex in id_block:
@@ -231,9 +223,9 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf:
                     sf.write(data)
 
-            # Base image - g_block 已经是 PIL Image 对象
-            g_block.save(temp_input_path, format="tiff")
-            # 保存后立即删除 Image 对象，释放内存
+            # Base image - g_block 是 NumPy 数组，直接使用 np.save（避免 TIFF 编码的额外内存开销）
+            np.save(temp_input_path, g_block)
+            # 保存后立即删除 NumPy 数组，释放内存
             del g_block
             import gc
             gc.collect()
@@ -251,9 +243,9 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             del data
             gc.collect()
 
-            # Quality image - q_block 已经是 PIL Image 对象
-            q_block.save(temp_input_path, format="tiff")
-            # 保存后立即删除 Image 对象
+            # Quality image - q_block 是 NumPy 数组，直接使用 np.save
+            np.save(temp_input_path, q_block)
+            # 保存后立即删除 NumPy 数组
             del q_block
             gc.collect()
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
@@ -462,29 +454,21 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         with open(temp_input_path, "wb") as temp_input_file:
             temp_input_file.write(quality_data)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        try:
-            with Image.open(temp_output_path) as img:
-                quality = img.copy()
-        except UnidentifiedImageError:
-            tqdm.write(f"无法识别的图像文件: {temp_output_path}")
-            raise
+        # 使用 np.load 加载 NumPy 数组（比 PIL Image 更快且内存效率更高）
+        quality = np.load(temp_output_path, allow_pickle=False)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.npy'))
 
         # Base
         with open(temp_input_path, "wb") as temp_input_file:
             temp_input_file.write(g_prime_data)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        try:
-            with Image.open(temp_output_path) as img:
-                g_prime = img.copy()
-        except UnidentifiedImageError:
-            tqdm.write(f"无法识别的图像文件: {temp_output_path}")
-            raise
+        # 使用 np.load 加载 NumPy 数组
+        g_prime = np.load(temp_output_path, allow_pickle=False)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.npy'))
 
     finally:
         if os.path.exists(temp_input_path):
