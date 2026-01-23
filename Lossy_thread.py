@@ -208,6 +208,8 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_regex.lpaq8"), "wb") as sf:
                     sf.write(data)
+            del data
+            gc.collect()
 
             # ID Tokens
             with open(temp_input_path, "w") as f:
@@ -222,12 +224,12 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf:
                     sf.write(data)
+            del data
+            gc.collect()
 
-            # Base image - g_block 是 NumPy 数组，直接使用 np.save（避免 TIFF 编码的额外内存开销）
+            # Base image - 序列化处理，先压缩g_block再删除，避免同时持有g_block和q_block
             np.save(temp_input_path, g_block)
-            # 保存后立即删除 NumPy 数组，释放内存
-            del g_block
-            import gc
+            del g_block  # 立即删除以释放~64MB
             gc.collect()
 
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
@@ -239,15 +241,14 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf:
                     sf.write(data)
-            # 删除压缩后的数据
             del data
             gc.collect()
 
-            # Quality image - q_block 是 NumPy 数组，直接使用 np.save
+            # Quality image - 现在g_block已经被删除，只持有q_block
             np.save(temp_input_path, q_block)
-            # 保存后立即删除 NumPy 数组
-            del q_block
+            del q_block  # 立即删除以释放~64MB
             gc.collect()
+
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Quality")
@@ -257,6 +258,8 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             if save:
                 with open(os.path.join(back_dir, f"chunk_{block_count}_quality.lpaq8"), "wb") as sf:
                     sf.write(data)
+            del data
+            gc.collect()
     finally:
         if os.path.exists(temp_input_path):
             os.remove(temp_input_path)
