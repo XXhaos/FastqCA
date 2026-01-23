@@ -157,16 +157,22 @@ def process_records(records, rules_dict, rules_dict_q):
     # 删除不再需要的数组以释放内存
     del base_image_block, quality_block
 
-    # 直接返回 NumPy 数组，不转换为 PIL Image，节省内存
-    return g_prime, q_prime, id_block
+    # 转换为 PIL Image 对象
+    g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
+    q_prime_img = Image.fromarray(q_prime.astype(np.uint8))
+
+    # 删除 NumPy 数组，只保留 Image 对象
+    del g_prime, q_prime
+
+    return g_prime_img, q_prime_img, id_block
 
 
 def save_intermediate_files(g_block, q_block, id_block, output_path, block_count):
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
-    # 临时转换为 Image 对象保存，保存后立即释放
-    Image.fromarray(g_block.astype(np.uint8)).save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
-    Image.fromarray(q_block.astype(np.uint8)).save(os.path.join(front_dir, f'chunk_{block_count}_quality.tiff'))
+    # g_block 和 q_block 已经是 PIL Image 对象
+    g_block.save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
+    q_block.save(os.path.join(front_dir, f'chunk_{block_count}_quality.tiff'))
     with open(os.path.join(front_dir, f"chunk_{block_count}_id_tokens.txt"), 'w') as f1, \
             open(os.path.join(front_dir, f"chunk_{block_count}_id_regex.txt"), 'w') as f2:
         for tokens, regex in id_block:
@@ -225,8 +231,8 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf:
                     sf.write(data)
 
-            # Base image - 临时转换为 Image 保存
-            Image.fromarray(g_block.astype(np.uint8)).save(temp_input_path, format="tiff")
+            # Base image - g_block 已经是 PIL Image 对象
+            g_block.save(temp_input_path, format="tiff")
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Base")
@@ -237,8 +243,8 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
                 with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf:
                     sf.write(data)
 
-            # Quality image - 临时转换为 Image 保存
-            Image.fromarray(q_block.astype(np.uint8)).save(temp_input_path, format="tiff")
+            # Quality image - q_block 已经是 PIL Image 对象
+            q_block.save(temp_input_path, format="tiff")
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Quality")
