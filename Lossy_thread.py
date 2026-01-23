@@ -124,102 +124,55 @@ def generate_q_prime(Q, rules_dict_q):
     return Q_prime
 
 
-def parse_fastq_chunk_lightweight(file_path, max_reads=None):
-    """
-    轻量级 FASTQ 解析器，避免 BioPython SeqRecord 的开销
-    直接返回需要的数据结构，减少内存占用 ~50%
-    """
-    ids = []
-    seqs = []
-    quals = []
-
-    with open(file_path, 'r') as f:
-        count = 0
-        while True:
-            if max_reads and count >= max_reads:
-                break
-
-            id_line = f.readline()
-            if not id_line:
-                break
-            seq_line = f.readline()
-            plus_line = f.readline()
-            qual_line = f.readline()
-
-            if not qual_line:
-                break
-
-            ids.append(id_line.strip()[1:])  # 去掉 '@'
-            seqs.append(seq_line.strip())
-            quals.append(qual_line.strip())
-            count += 1
-
-    return ids, seqs, quals
-
-
-def process_records_optimized(ids, seqs, quals, rules_dict, rules_dict_q):
-    """
-    优化的处理函数：
-    1. 直接接受解析后的数据，不需要 SeqRecord 对象
-    2. 减少内存拷贝
-    3. 立即释放中间数据
-    """
-    num_records = len(ids)
+def process_records(records, rules_dict, rules_dict_q):
+    num_records = len(records)
     if num_records == 0:
         return None, None, None
 
-    seq_length = len(seqs[0])
+    # 获取序列长度
+    seq_length = len(records[0].seq)
 
-    # 预分配数组
+    # 预分配 NumPy 数组而不是使用列表，减少内存消耗
     base_image_block = np.zeros((num_records, seq_length), dtype=np.uint8)
     quality_block = np.zeros((num_records, seq_length), dtype=np.uint8)
     id_block = []
 
-    # 处理数据
-    for i in range(num_records):
-        # 处理 ID
-        id_str = ids[i]
+    for i, record in enumerate(records):
+        id_str = record.description
         delimiters = find_delimiters(id_str)
         tokens = split_identifier(id_str, delimiters)
         regex = generate_regex(delimiters)
         id_block.append((tokens, regex))
 
-        # 处理序列
-        for j, base in enumerate(seqs[i]):
+        # 直接填充到 NumPy 数组中，避免创建中间列表
+        for j, base in enumerate(record.seq):
             base_image_block[i, j] = base_to_gray.get(base, 0)
 
-        # 处理质量分数
-        for j, q_char in enumerate(quals[i]):
-            base_quality = ord(q_char) - 33  # FASTQ Phred+33
-            quality_block[i, j] = Q4(base_quality)
+        for j, q in enumerate(record.letter_annotations["phred_quality"]):
+            quality_block[i, j] = Q4(q)
 
-    # 生成 g_prime 和 q_prime
     g_prime = generate_g_prime(base_image_block, rules_dict)
     q_prime = generate_q_prime(quality_block, rules_dict_q)
 
-    # 立即删除不再需要的数组
+    # 删除不再需要的数组以释放内存
     del base_image_block, quality_block
-    import gc
-    gc.collect()
 
-    # 直接返回 NumPy 数组，不转换为 PIL Image
-    # 这样避免了额外的内存开销
-    return g_prime, q_prime, id_block
+    # 转换为 PIL Image 对象
+    g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
+    q_prime_img = Image.fromarray(q_prime.astype(np.uint8))
+
+    # 删除 NumPy 数组，只保留 Image 对象
+    del g_prime, q_prime
+
+    return g_prime_img, q_prime_img, id_block
 
 
 def save_intermediate_files(g_block, q_block, id_block, output_path, block_count):
-    """
-    保存中间文件 - 使用 NumPy 原生格式代替 TIFF
-    这样避免了 PIL Image 的内存开销
-    """
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
-
-    # 使用 NumPy 的 save 函数代替 PIL Image
-    # 内存占用更小，速度更快
-    np.save(os.path.join(front_dir, f'chunk_{block_count}_base.npy'), g_block)
-    np.save(os.path.join(front_dir, f'chunk_{block_count}_quality.npy'), q_block)
-
+    # g_block 和 q_block 已经是 PIL Image 对象
+    g_block.save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
+    q_block.save(os.path.join(front_dir, f'chunk_{block_count}_quality.tiff'))
     with open(os.path.join(front_dir, f"chunk_{block_count}_id_tokens.txt"), 'w') as f1, \
             open(os.path.join(front_dir, f"chunk_{block_count}_id_regex.txt"), 'w') as f2:
         for tokens, regex in id_block:
@@ -278,9 +231,8 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
                 with open(os.path.join(back_dir, f"chunk_{block_count}_id_tokens.lpaq8"), "wb") as sf:
                     sf.write(data)
 
-            # Base image - 使用 NumPy save 代替 PIL Image
-            # 这样避免了 TIFF 编码的内存开销
-            np.save(temp_input_path, g_block)
+            # Base image - g_block 已经是 PIL Image 对象
+            g_block.save(temp_input_path, format="tiff")
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Base")
@@ -291,8 +243,8 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
                 with open(os.path.join(back_dir, f"chunk_{block_count}_base_g_prime.lpaq8"), "wb") as sf:
                     sf.write(data)
 
-            # Quality image - 使用 NumPy save 代替 PIL Image
-            np.save(temp_input_path, q_block)
+            # Quality image - q_block 已经是 PIL Image 对象
+            q_block.save(temp_input_path, format="tiff")
             compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path)
             if not os.path.exists(temp_output_path):
                 raise RuntimeError("LPAQ8 compression failed for Quality")
@@ -316,20 +268,20 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
         import gc
         gc.collect()
 
-        # 使用轻量级解析器 - 避免 SeqRecord 对象的内存开销
-        # 预期节省: ~200MB (SeqRecord 对象开销)
-        ids, seqs, quals = parse_fastq_chunk_lightweight(temp_chunk_path)
+        # 读取 records - 这是最大的内存消耗点（~373MB）
+        with open(temp_chunk_path, 'r') as f:
+            records = list(SeqIO.parse(f, "fastq"))
 
-        if not ids:
+        if not records:
             return block_count
 
-        # 处理数据
+        # 处理 records
         rules_dict = init_rules_dict()
         rules_dict_q = init_rules_dict_q()
-        g_block, q_block, id_block = process_records_optimized(ids, seqs, quals, rules_dict, rules_dict_q)
+        g_block, q_block, id_block = process_records(records, rules_dict, rules_dict_q)
 
-        # 立即删除原始数据以释放内存
-        del ids, seqs, quals
+        # 立即删除 records 列表以释放 ~373MB 内存
+        del records
         del rules_dict, rules_dict_q
         gc.collect()
 
@@ -338,10 +290,6 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
         if save:
             save_intermediate_files(g_block, q_block, id_block, output_path, block_count)
         back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, save, block_count)
-
-        # 处理完后立即释放
-        del g_block, q_block, id_block
-        gc.collect()
     finally:
         if os.path.exists(temp_chunk_path):
             try:
@@ -491,31 +439,33 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
 
         id_block = zip(id_tokens, id_regex)
 
-        # Quality - 使用 NumPy load 代替 PIL Image
+        # Quality
         with open(temp_input_path, "wb") as temp_input_file:
             temp_input_file.write(quality_data)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
         try:
-            quality = np.load(temp_output_path, allow_pickle=False)
-        except Exception as e:
-            tqdm.write(f"无法加载 NumPy 文件: {temp_output_path}, 错误: {e}")
+            with Image.open(temp_output_path) as img:
+                quality = img.copy()
+        except UnidentifiedImageError:
+            tqdm.write(f"无法识别的图像文件: {temp_output_path}")
             raise
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.npy'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.tiff'))
 
-        # Base - 使用 NumPy load 代替 PIL Image
+        # Base
         with open(temp_input_path, "wb") as temp_input_file:
             temp_input_file.write(g_prime_data)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
         try:
-            g_prime = np.load(temp_output_path, allow_pickle=False)
-        except Exception as e:
-            tqdm.write(f"无法加载 NumPy 文件: {temp_output_path}, 错误: {e}")
+            with Image.open(temp_output_path) as img:
+                g_prime = img.copy()
+        except UnidentifiedImageError:
+            tqdm.write(f"无法识别的图像文件: {temp_output_path}")
             raise
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.npy'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.tiff'))
 
     finally:
         if os.path.exists(temp_input_path):
