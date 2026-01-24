@@ -162,9 +162,15 @@ def process_records(records, rules_dict, rules_dict_q):
 def save_intermediate_files(g_block, q_block, id_block, output_path, block_count):
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
-    # g_block 和 q_block 是 NumPy 数组，使用 np.save 保存（比 TIFF 更快且不消耗额外内存）
-    np.save(os.path.join(front_dir, f'chunk_{block_count}_base.npy'), g_block)
-    np.save(os.path.join(front_dir, f'chunk_{block_count}_quality.npy'), q_block)
+    # g_block 和 q_block 是 NumPy 数组，保存为原始二进制格式（避免np.save的.npy扩展名问题）
+    with open(os.path.join(front_dir, f'chunk_{block_count}_base.bin'), 'wb') as f:
+        f.write(struct.pack('<II', *g_block.shape))
+        f.write(struct.pack('B', g_block.dtype.itemsize))
+        f.write(g_block.tobytes())
+    with open(os.path.join(front_dir, f'chunk_{block_count}_quality.bin'), 'wb') as f:
+        f.write(struct.pack('<II', *q_block.shape))
+        f.write(struct.pack('B', q_block.dtype.itemsize))
+        f.write(q_block.tobytes())
     with open(os.path.join(front_dir, f"chunk_{block_count}_id_tokens.txt"), 'w') as f1, \
             open(os.path.join(front_dir, f"chunk_{block_count}_id_regex.txt"), 'w') as f2:
         for tokens, regex in id_block:
@@ -228,7 +234,11 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             gc.collect()
 
             # Base image - 序列化处理，先压缩g_block再删除，避免同时持有g_block和q_block
-            np.save(temp_input_path, g_block)
+            # 写入原始二进制数据（包含shape和dtype信息）
+            with open(temp_input_path, 'wb') as f:
+                f.write(struct.pack('<II', *g_block.shape))
+                f.write(struct.pack('B', g_block.dtype.itemsize))
+                f.write(g_block.tobytes())
             del g_block  # 立即删除以释放~64MB
             gc.collect()
 
@@ -245,7 +255,11 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
             gc.collect()
 
             # Quality image - 现在g_block已经被删除，只持有q_block
-            np.save(temp_input_path, q_block)
+            # 写入原始二进制数据（包含shape和dtype信息）
+            with open(temp_input_path, 'wb') as f:
+                f.write(struct.pack('<II', *q_block.shape))
+                f.write(struct.pack('B', q_block.dtype.itemsize))
+                f.write(q_block.tobytes())
             del q_block  # 立即删除以释放~64MB
             gc.collect()
 
@@ -457,21 +471,27 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
         with open(temp_input_path, "wb") as temp_input_file:
             temp_input_file.write(quality_data)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        # 使用 np.load 加载 NumPy 数组（比 PIL Image 更快且内存效率更高）
-        quality = np.load(temp_output_path, allow_pickle=False)
+        # 读取原始二进制数据（包含shape和dtype信息）
+        with open(temp_output_path, 'rb') as f:
+            shape = struct.unpack('<II', f.read(8))
+            itemsize = struct.unpack('B', f.read(1))[0]
+            quality = np.frombuffer(f.read(), dtype=np.uint8).reshape(shape)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.npy'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.bin'))
 
         # Base
         with open(temp_input_path, "wb") as temp_input_file:
             temp_input_file.write(g_prime_data)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        # 使用 np.load 加载 NumPy 数组
-        g_prime = np.load(temp_output_path, allow_pickle=False)
+        # 读取原始二进制数据（包含shape和dtype信息）
+        with open(temp_output_path, 'rb') as f:
+            shape = struct.unpack('<II', f.read(8))
+            itemsize = struct.unpack('B', f.read(1))[0]
+            g_prime = np.frombuffer(f.read(), dtype=np.uint8).reshape(shape)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.npy'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.bin'))
 
     finally:
         if os.path.exists(temp_input_path):

@@ -122,9 +122,15 @@ def process_records(records_iter, record_count, read_length, rules_dict):
 def save_intermediate_files(g_block, quality_block, id_block, output_path, block_count):
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
-    # g_block 和 quality_block 是 NumPy 数组，使用 np.save 保存
-    np.save(os.path.join(front_dir, f'chunk_{block_count}_base.npy'), g_block)
-    np.save(os.path.join(front_dir, f'chunk_{block_count}_quality.npy'), quality_block)
+    # g_block 和 quality_block 是 NumPy 数组，保存为原始二进制格式
+    with open(os.path.join(front_dir, f'chunk_{block_count}_base.bin'), 'wb') as f:
+        f.write(struct.pack('<II', *g_block.shape))
+        f.write(struct.pack('B', g_block.dtype.itemsize))
+        f.write(g_block.tobytes())
+    with open(os.path.join(front_dir, f'chunk_{block_count}_quality.bin'), 'wb') as f:
+        f.write(struct.pack('<II', *quality_block.shape))
+        f.write(struct.pack('B', quality_block.dtype.itemsize))
+        f.write(quality_block.tobytes())
     with open(os.path.join(front_dir, f"chunk_{block_count}_id_tokens.txt"), 'w') as f1, \
             open(os.path.join(front_dir, f"chunk_{block_count}_id_regex.txt"), 'w') as f2:
         for tokens, regex in id_block:
@@ -186,7 +192,14 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
             gc.collect()
 
             # 3. Base - 序列化处理，先压缩g_block再删除
-            np.save(temp_input_path, g_block)
+            # 写入原始二进制数据（包含shape和dtype信息）
+            with open(temp_input_path, 'wb') as f:
+                # 写入shape信息（2个uint32）
+                f.write(struct.pack('<II', *g_block.shape))
+                # 写入dtype（1个字节）
+                f.write(struct.pack('B', g_block.dtype.itemsize))
+                # 写入原始数据
+                f.write(g_block.tobytes())
             del g_block  # 立即删除以释放内存
             gc.collect()
 
@@ -201,7 +214,14 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
             gc.collect()
 
             # 4. Quality - 现在g_block已经被删除，只持有quality_block
-            np.save(temp_input_path, quality_block)
+            # 写入原始二进制数据（包含shape和dtype信息）
+            with open(temp_input_path, 'wb') as f:
+                # 写入shape信息（2个uint32）
+                f.write(struct.pack('<II', *quality_block.shape))
+                # 写入dtype（1个字节）
+                f.write(struct.pack('B', quality_block.dtype.itemsize))
+                # 写入原始数据
+                f.write(quality_block.tobytes())
             del quality_block  # 立即删除以释放内存
             gc.collect()
 
@@ -404,20 +424,32 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_p
         # 3. Quality
         shutil.copyfile(quality_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        # 使用 np.load 加载 NumPy 数组
-        quality = np.load(temp_output_path, allow_pickle=False)
+        # 读取原始二进制数据（包含shape和dtype信息）
+        with open(temp_output_path, 'rb') as f:
+            # 读取shape信息（2个uint32）
+            shape = struct.unpack('<II', f.read(8))
+            # 读取dtype（1个字节）
+            itemsize = struct.unpack('B', f.read(1))[0]
+            # 读取原始数据并重建数组
+            quality = np.frombuffer(f.read(), dtype=np.uint8).reshape(shape)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_quality.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.npy'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_quality.bin'))
 
         # 4. G Prime
         shutil.copyfile(g_prime_path, temp_input_path)
         decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path)
-        # 使用 np.load 加载 NumPy 数组
-        g_prime = np.load(temp_output_path, allow_pickle=False)
+        # 读取原始二进制数据（包含shape和dtype信息）
+        with open(temp_output_path, 'rb') as f:
+            # 读取shape信息（2个uint32）
+            shape = struct.unpack('<II', f.read(8))
+            # 读取dtype（1个字节）
+            itemsize = struct.unpack('B', f.read(1))[0]
+            # 读取原始数据并重建数组
+            g_prime = np.frombuffer(f.read(), dtype=np.uint8).reshape(shape)
         if save:
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f'chunk_{block_count}_base_g_prime.lpaq8'))
-            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.npy'))
+            shutil.copy(temp_output_path, os.path.join(front_compress_dir, f'chunk_{block_count}_base_g_prime.bin'))
 
     finally:
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
