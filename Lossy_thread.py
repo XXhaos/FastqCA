@@ -509,7 +509,7 @@ def reconstruct_base_and_quality(g_prime_img, q_prime_img):
 
 
 def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False, custom_path=None):
-    """流式写入 FASTQ，避免构造大列表/SeqRecord 造成内存峰值。"""
+    """流式逐行重建并写入 FASTQ，保持常数行缓冲，避免构造大数组造成内存峰值。"""
     target_fastq_path = custom_path if custom_path else (
         output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
     )
@@ -519,24 +519,58 @@ def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_
     id_regex = [item[1] for item in id_block]
     ids = reconstruct_id(id_tokens, id_regex)
 
-    # 重建base和quality，使用流式处理
+    g_prime_array = np.array(g_prime_img, dtype=np.uint8)
+    q_prime_array = np.array(quality_img, dtype=np.uint8)
+    rows, cols = g_prime_array.shape
+
+    # 行递归重建base和quality，保持常数行缓冲，避免整块数组常驻内存
     rules_dict = init_rules_dict()
     rules_dict_q = init_rules_dict_q()
-    g_prime_array = np.array(g_prime_img)
-    bases_array = reconstruct_g_from_g_prime(g_prime_array, rules_dict)
-    q_prime_array = np.array(quality_img)
-    quality_array = reconstruct_q_from_q_prime(q_prime_array, rules_dict_q)
+    prev_base_row = np.zeros(cols, dtype=np.uint8)
+    prev_qual_row = np.zeros(cols, dtype=np.uint8)
 
     mode = 'w' if custom_path or is_first_block else 'a'
     with open(target_fastq_path, mode, buffering=1024 * 1024) as output_handle:
-        for i in range(bases_array.shape[0]):
-            base_str = ''.join([gray_to_base[pixel] for pixel in bases_array[i]])
-            quality_scores = quality_array[i]
-            qual_str = ''.join([chr(q + 33) for q in quality_scores])
+        for i in range(rows):
+            # 逐行重建base
+            de_base_row = np.empty(cols, dtype=np.uint8)
+            gp_row = g_prime_array[i]
+            for j in range(cols):
+                center = gp_row[j]
+                up = prev_base_row[j] if i != 0 else 0
+                left = de_base_row[j - 1] if j != 0 else 0
+                left_up = prev_base_row[j - 1] if i != 0 and j != 0 else 0
+                candidates = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
+                top_rule = max(candidates, key=lambda r: rules_dict[r])
+                de_base_row[j] = top_rule[3] if gp_row[j] == 1 else center
+                matched_rule = (up, left_up, left, de_base_row[j])
+                rules_dict[matched_rule] += 1
+
+            # 逐行重建quality
+            de_qual_row = np.empty(cols, dtype=np.uint8)
+            qp_row = q_prime_array[i]
+            for j in range(cols):
+                center = qp_row[j]
+                up = prev_qual_row[j] if i != 0 else 0
+                left = de_qual_row[j - 1] if j != 0 else 0
+                left_up = prev_qual_row[j - 1] if i != 0 and j != 0 else 0
+                candidates = [(up, left_up, left, v) for v in [5, 12, 18, 24]]
+                top_rule = max(candidates, key=lambda r: rules_dict_q[r])
+                de_qual_row[j] = top_rule[3] if qp_row[j] == 1 else center
+                matched_rule = (up, left_up, left, de_qual_row[j])
+                rules_dict_q[matched_rule] += 1
+
+            # 转换为字符串并写入
+            base_str = ''.join([gray_to_base[pixel] for pixel in de_base_row])
+            qual_str = ''.join([chr(q + 33) for q in de_qual_row])
             output_handle.write(f"@{ids[i]}\n{base_str}\n+\n{qual_str}\n")
 
-    # 显式释放大数组
-    del g_prime_array, q_prime_array, bases_array, quality_array, ids, rules_dict, rules_dict_q
+            # 更新前一行缓存
+            prev_base_row = de_base_row
+            prev_qual_row = de_qual_row
+
+    # 显式释放
+    del g_prime_array, q_prime_array, prev_base_row, prev_qual_row, ids, rules_dict, rules_dict_q
     gc.collect()
 
 
