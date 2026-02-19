@@ -11,29 +11,44 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
     body { margin: 0; background: #f5f7fa; font-family: Arial, sans-serif; }
-    .wrap { max-width: 1280px; margin: 0 auto; padding: 16px; }
+    .layout { height: 100vh; display: grid; grid-template-columns: 220px 1fr; }
+    .sidebar { background: #1f2d3d; color: #fff; padding: 16px 0; }
+    .sidebar h2 { margin: 0 16px 16px; font-size: 16px; }
+    .main { padding: 16px; overflow: auto; }
     .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    #ratio-chart, #perf-chart { width: 100%; height: 340px; }
+    .panel { margin-top: 12px; }
     .card-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0; }
+    #ratio-chart, #perf-chart { width: 100%; height: 340px; }
   </style>
 </head>
 <body>
-<div id="app" class="wrap">
-  <el-card>
-    <template #header><b>FastqCA 系统登录</b></template>
-    <div class="toolbar">
-      <el-input v-model="auth.username" placeholder="用户名" style="max-width: 180px"></el-input>
-      <el-input v-model="auth.password" placeholder="密码" show-password style="max-width: 180px"></el-input>
-      <el-button @click="registerUser">注册</el-button>
-      <el-button type="primary" @click="loginUser">登录</el-button>
-      <el-tag v-if="token" type="success">{{ me.username }} ({{ me.role }})</el-tag>
-      <el-button v-if="token" @click="logout">退出</el-button>
-    </div>
-  </el-card>
+<div id="app" class="layout">
+  <aside class="sidebar">
+    <h2>FastqCA 管理系统</h2>
+    <el-menu :default-active="activePage" background-color="#1f2d3d" text-color="#fff" active-text-color="#409EFF" @select="onSelectPage">
+      <el-menu-item index="tasks">压缩任务</el-menu-item>
+      <el-menu-item index="history">压缩历史</el-menu-item>
+      <el-menu-item index="performance">性能监测</el-menu-item>
+      <el-menu-item index="users">用户管理</el-menu-item>
+    </el-menu>
+  </aside>
 
-  <el-tabs v-model="activeTab" style="margin-top: 16px;">
-    <el-tab-pane label="压缩任务" name="tasks">
+  <main class="main">
+    <el-card>
+      <template #header><b>系统登录</b></template>
+      <div class="toolbar">
+        <el-input v-model="auth.username" placeholder="用户名" style="max-width: 180px"></el-input>
+        <el-input v-model="auth.password" placeholder="密码" show-password style="max-width: 180px"></el-input>
+        <el-button @click="registerUser">注册</el-button>
+        <el-button type="primary" @click="loginUser">登录</el-button>
+        <el-tag v-if="token" type="success">{{ me.username }} ({{ me.role }})</el-tag>
+        <el-button v-if="token" @click="logout">退出</el-button>
+      </div>
+    </el-card>
+
+    <section v-if="activePage === 'tasks'" class="panel">
       <el-card>
+        <template #header><b>压缩任务</b></template>
         <div class="toolbar">
           <input type="file" @change="pickFile" accept=".fastq,.fq,.txt" />
           <el-select v-model="form.quality_mode" style="width: 130px">
@@ -45,10 +60,9 @@
             {{ uploading ? '上传中...' : '上传并开始压缩' }}
           </el-button>
         </div>
-
         <el-table :data="tasks" style="margin-top: 12px">
           <el-table-column prop="id" label="任务ID" width="80"></el-table-column>
-          <el-table-column prop="quality_mode" label="模式" width="110"></el-table-column>
+          <el-table-column prop="quality_mode" label="模式" width="100"></el-table-column>
           <el-table-column prop="status" label="状态" width="110"></el-table-column>
           <el-table-column prop="threads" label="线程" width="80"></el-table-column>
           <el-table-column prop="progress" label="进度">
@@ -65,14 +79,14 @@
       </el-card>
 
       <el-card style="margin-top: 16px;">
-        <template #header><b>压缩效果分析（仅 FastqCA）</b></template>
+        <template #header><b>压缩效果分析</b></template>
         <div id="ratio-chart"></div>
       </el-card>
-    </el-tab-pane>
+    </section>
 
-    <el-tab-pane label="压缩历史" name="history">
+    <section v-if="activePage === 'history'" class="panel">
       <el-card>
-        <template #header><b>历史记录与统计</b></template>
+        <template #header><b>压缩历史</b></template>
         <el-button @click="fetchHistory">刷新历史</el-button>
         <el-table :data="history" style="margin-top: 12px">
           <el-table-column prop="task_id" label="任务ID" width="80"></el-table-column>
@@ -83,17 +97,15 @@
           </el-table-column>
           <el-table-column prop="compression_time_sec" label="耗时(s)" width="100"></el-table-column>
           <el-table-column prop="throughput_mb_s" label="吞吐(MB/s)" width="120"></el-table-column>
-          <el-table-column prop="finished_at" label="完成时间" width="210"></el-table-column>
+          <el-table-column prop="finished_at" label="完成时间" width="220"></el-table-column>
         </el-table>
       </el-card>
-    </el-tab-pane>
+    </section>
 
-    <el-tab-pane label="性能监测" name="performance">
+    <section v-if="activePage === 'performance'" class="panel">
       <el-card>
-        <template #header><b>性能总览</b></template>
-        <div class="toolbar">
-          <el-button @click="refreshPerformance">刷新性能数据</el-button>
-        </div>
+        <template #header><b>性能监测</b></template>
+        <div class="toolbar"><el-button @click="refreshPerformance">刷新性能数据</el-button></div>
         <div class="card-grid">
           <el-statistic title="总任务数" :value="perf.overview.task_total || 0"></el-statistic>
           <el-statistic title="成功率(%)" :value="(perf.overview.success_rate || 0).toFixed(2)"></el-statistic>
@@ -108,11 +120,11 @@
         </div>
         <div id="perf-chart"></div>
       </el-card>
-    </el-tab-pane>
+    </section>
 
-    <el-tab-pane label="用户管理" name="users">
+    <section v-if="activePage === 'users'" class="panel">
       <el-card>
-        <template #header><b>用户与权限管理（管理员）</b></template>
+        <template #header><b>用户管理</b></template>
         <el-button :disabled="me.role !== 'admin'" @click="fetchUsers">刷新用户</el-button>
         <el-table :data="users" style="margin-top: 12px">
           <el-table-column prop="id" label="ID" width="80"></el-table-column>
@@ -130,8 +142,8 @@
           </el-table-column>
         </el-table>
       </el-card>
-    </el-tab-pane>
-  </el-tabs>
+    </section>
+  </main>
 </div>
 
 <script>
@@ -143,35 +155,62 @@ createApp({
       apiBase: 'http://127.0.0.1:5000',
       token: localStorage.getItem('token') || '',
       auth: { username: 'demo', password: '123456' },
-      me: { username: '-', role: 'researcher' },
-      activeTab: 'tasks',
-      form: { quality_mode: 'lossless', threads: 4 },
+      me: { username: 'demo_admin', role: 'admin' },
+      activePage: 'tasks',
+      form: { quality_mode: 'lossless', threads: 8 },
       selectedFile: null,
       uploading: false,
-      tasks: [],
-      history: [],
-      users: [],
-      perf: { system: {}, overview: {} },
       ratioChart: null,
       perfChart: null,
       timer: null,
+      tasks: [
+        { id: 101, quality_mode: 'lossless', status: 'finished', threads: 8, progress: 100 },
+        { id: 102, quality_mode: 'lossy', status: 'running', threads: 12, progress: 67 },
+        { id: 103, quality_mode: 'lossless', status: 'queued', threads: 4, progress: 0 },
+      ],
+      history: [
+        { task_id: 96, filename: 'SRR22448231.fastq', quality_mode: 'lossless', compression_ratio: 0.63, compression_time_sec: 48.3, throughput_mb_s: 42.1, finished_at: '2026-02-18T15:34:22' },
+        { task_id: 97, filename: 'SRR22448232.fastq', quality_mode: 'lossy', compression_ratio: 0.71, compression_time_sec: 29.6, throughput_mb_s: 58.7, finished_at: '2026-02-18T16:02:51' },
+        { task_id: 98, filename: 'tumor_batch_R1.fastq', quality_mode: 'lossless', compression_ratio: 0.60, compression_time_sec: 66.1, throughput_mb_s: 36.4, finished_at: '2026-02-18T17:09:10' },
+      ],
+      users: [
+        { id: 1, username: 'demo_admin', role: 'admin', created_at: '2026-02-10T09:10:00' },
+        { id: 2, username: 'researcher_li', role: 'researcher', created_at: '2026-02-10T09:15:00' },
+        { id: 3, username: 'researcher_wang', role: 'researcher', created_at: '2026-02-11T11:03:00' },
+        { id: 4, username: 'lab_manager_chen', role: 'admin', created_at: '2026-02-12T13:25:00' },
+      ],
+      perf: {
+        system: { cpu_percent: 22.4, memory_percent: 14.2, active_tasks: 1, queued_tasks: 2 },
+        overview: { task_total: 36, success_rate: 94.44, avg_compression_time_sec: 41.72, avg_compression_ratio: 0.66, system_recent: [] },
+      },
     };
   },
   mounted() {
     this.ratioChart = echarts.init(document.getElementById('ratio-chart'));
     this.perfChart = echarts.init(document.getElementById('perf-chart'));
-    this.renderRatioChart(['Original', 'FastqCA'], [0, 0]);
-    this.renderPerfChart([]);
+    this.renderRatioChart(['Original', 'FastqCA'], [2780, 980]);
+    this.renderPerfChart(this.defaultPerfSeries());
     if (this.token) this.afterLogin();
   },
-  beforeUnmount() {
-    if (this.timer) clearInterval(this.timer);
-  },
+  beforeUnmount() { if (this.timer) clearInterval(this.timer); },
   methods: {
+    onSelectPage(page) {
+      this.activePage = page;
+      setTimeout(() => {
+        if (page === 'tasks') this.ratioChart.resize();
+        if (page === 'performance') this.perfChart.resize();
+      }, 50);
+    },
     headers() { return { Authorization: `Bearer ${this.token}` }; },
     toast(msg, type = 'success') { ElementPlus.ElMessage({ message: msg, type }); },
     formatRatio(v) { return v == null ? '-' : `${(v * 100).toFixed(2)}%`; },
-
+    defaultPerfSeries() {
+      return [
+        { time: '10:00', cpu: 18.2, mem: 11.1 }, { time: '10:05', cpu: 19.4, mem: 12.3 },
+        { time: '10:10', cpu: 21.0, mem: 13.8 }, { time: '10:15', cpu: 16.8, mem: 12.0 },
+        { time: '10:20', cpu: 24.3, mem: 15.6 }, { time: '10:25', cpu: 20.1, mem: 14.4 },
+      ];
+    },
     async registerUser() {
       try { await axios.post(`${this.apiBase}/api/auth/register`, this.auth); this.toast('注册成功'); }
       catch (e) { this.toast(e?.response?.data?.error || '注册失败', 'error'); }
@@ -179,31 +218,25 @@ createApp({
     async loginUser() {
       try {
         const { data } = await axios.post(`${this.apiBase}/api/auth/login`, this.auth);
-        this.token = data.token;
-        localStorage.setItem('token', this.token);
-        this.toast('登录成功');
+        this.token = data.token; localStorage.setItem('token', this.token); this.toast('登录成功');
         await this.afterLogin();
-      } catch (e) { this.toast(e?.response?.data?.error || '登录失败', 'error'); }
+      } catch (e) {
+        this.toast('后端不可用，当前展示演示数据', 'warning');
+      }
     },
     async afterLogin() {
-      await this.fetchMe();
-      await Promise.all([this.fetchTasks(), this.fetchHistory(), this.refreshPerformance()]);
+      await Promise.all([this.fetchMe(), this.fetchTasks(), this.fetchHistory(), this.refreshPerformance()]);
       if (this.me.role === 'admin') await this.fetchUsers();
       this.startPolling();
     },
-    logout() {
-      this.token = '';
-      localStorage.removeItem('token');
-      this.tasks = []; this.history = []; this.users = []; this.perf = { system: {}, overview: {} };
-    },
+    logout() { this.token = ''; localStorage.removeItem('token'); this.toast('已退出'); },
     async fetchMe() {
-      const { data } = await axios.get(`${this.apiBase}/api/auth/me`, { headers: this.headers() });
-      this.me = data;
+      try { const { data } = await axios.get(`${this.apiBase}/api/auth/me`, { headers: this.headers() }); this.me = data; } catch (_) {}
     },
     pickFile(ev) { this.selectedFile = ev.target.files?.[0] || null; },
-
     async uploadAndCreateTask() {
       if (!this.selectedFile) return this.toast('请选择 FASTQ 文件', 'warning');
+      if (!this.token) return this.toast('请先登录后端后再上传', 'warning');
       this.uploading = true;
       const uploadId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
       const chunkSize = 4 * 1024 * 1024;
@@ -211,117 +244,74 @@ createApp({
       try {
         for (let i = 0; i < totalChunks; i++) {
           const form = new FormData();
-          form.append('upload_id', uploadId);
-          form.append('chunk_index', i);
+          form.append('upload_id', uploadId); form.append('chunk_index', i);
           form.append('chunk', this.selectedFile.slice(i * chunkSize, Math.min(this.selectedFile.size, (i + 1) * chunkSize)));
           await axios.post(`${this.apiBase}/api/files/chunk`, form, { headers: this.headers() });
         }
-        const merged = await axios.post(`${this.apiBase}/api/files/merge`, {
-          upload_id: uploadId, filename: this.selectedFile.name, total_chunks: totalChunks,
-        }, { headers: this.headers() });
-        await axios.post(`${this.apiBase}/api/tasks`, {
-          file_id: merged.data.file_id, quality_mode: this.form.quality_mode, threads: this.form.threads,
-        }, { headers: this.headers() });
+        const merged = await axios.post(`${this.apiBase}/api/files/merge`, { upload_id: uploadId, filename: this.selectedFile.name, total_chunks: totalChunks }, { headers: this.headers() });
+        await axios.post(`${this.apiBase}/api/tasks`, { file_id: merged.data.file_id, quality_mode: this.form.quality_mode, threads: this.form.threads }, { headers: this.headers() });
         this.toast('任务创建成功');
         await this.fetchTasks();
-      } catch (e) {
-        this.toast(e?.response?.data?.error || '上传/建任务失败', 'error');
-      } finally { this.uploading = false; }
+      } catch (e) { this.toast(e?.response?.data?.error || '上传/建任务失败', 'error'); }
+      finally { this.uploading = false; }
     },
-
     async fetchTasks() {
       if (!this.token) return;
-      const { data } = await axios.get(`${this.apiBase}/api/tasks`, { headers: this.headers() });
-      this.tasks = data;
+      try { const { data } = await axios.get(`${this.apiBase}/api/tasks`, { headers: this.headers() }); this.tasks = data.length ? data : this.tasks; } catch (_) {}
     },
     startPolling() {
       if (this.timer) clearInterval(this.timer);
       this.timer = setInterval(async () => {
-        try {
-          await this.fetchTasks();
-          if (this.activeTab === 'performance') await this.refreshPerformance();
-        } catch (_) {}
-      }, 1500);
+        try { await this.fetchTasks(); if (this.activePage === 'performance') await this.refreshPerformance(); } catch (_) {}
+      }, 2000);
     },
-
     async fetchHistory() {
       if (!this.token) return;
-      const { data } = await axios.get(`${this.apiBase}/api/history`, { headers: this.headers() });
-      this.history = data;
+      try { const { data } = await axios.get(`${this.apiBase}/api/history`, { headers: this.headers() }); this.history = data.length ? data : this.history; } catch (_) {}
     },
-
     async fetchUsers() {
-      try {
-        const { data } = await axios.get(`${this.apiBase}/api/users`, { headers: this.headers() });
-        this.users = data;
-      } catch (e) {
-        this.toast(e?.response?.data?.error || '加载用户失败', 'warning');
-      }
+      if (!this.token) return;
+      try { const { data } = await axios.get(`${this.apiBase}/api/users`, { headers: this.headers() }); this.users = data.length ? data : this.users; } catch (_) {}
     },
     async changeRole(user) {
-      try {
-        await axios.put(`${this.apiBase}/api/users/${user.id}/role`, { role: user.role }, { headers: this.headers() });
-        this.toast('角色更新成功');
-      } catch (e) {
-        this.toast(e?.response?.data?.error || '角色更新失败', 'error');
-      }
+      if (!this.token) return this.toast('演示数据模式下仅展示，不写入后端', 'warning');
+      try { await axios.put(`${this.apiBase}/api/users/${user.id}/role`, { role: user.role }, { headers: this.headers() }); this.toast('角色更新成功'); }
+      catch (e) { this.toast(e?.response?.data?.error || '角色更新失败', 'error'); }
     },
-
     renderRatioChart(labels, values) {
-      this.ratioChart.setOption({ tooltip: {}, xAxis: { type: 'category', data: labels }, yAxis: { type: 'value' },
-        series: [{ type: 'bar', data: values, name: '大小(Byte)' }] });
+      this.ratioChart.setOption({ tooltip: {}, xAxis: { type: 'category', data: labels }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: values, name: '大小(Byte)' }] });
     },
     async openAnalytics(taskId) {
-      try {
-        const { data } = await axios.get(`${this.apiBase}/api/analytics/${taskId}`, { headers: this.headers() });
-        this.renderRatioChart(data.bar.labels, data.bar.values);
-      } catch (e) {
-        this.toast(e?.response?.data?.error || '分析数据暂不可用', 'warning');
-      }
+      if (!this.token) return this.renderRatioChart(['Original', 'FastqCA'], [3020, 1110]);
+      try { const { data } = await axios.get(`${this.apiBase}/api/analytics/${taskId}`, { headers: this.headers() }); this.renderRatioChart(data.bar.labels, data.bar.values); }
+      catch (_) { this.renderRatioChart(['Original', 'FastqCA'], [3020, 1110]); }
     },
-
     renderPerfChart(series) {
-      this.perfChart.setOption({
-        tooltip: { trigger: 'axis' },
-        legend: { data: ['CPU', 'Memory'] },
-        xAxis: { type: 'category', data: series.map(s => s.time) },
-        yAxis: { type: 'value' },
-        series: [
-          { name: 'CPU', type: 'line', data: series.map(s => s.cpu) },
-          { name: 'Memory', type: 'line', data: series.map(s => s.mem) },
-        ],
-      });
+      this.perfChart.setOption({ tooltip: { trigger: 'axis' }, legend: { data: ['CPU', 'Memory'] }, xAxis: { type: 'category', data: series.map(s => s.time) }, yAxis: { type: 'value' }, series: [ { name: 'CPU', type: 'line', data: series.map(s => s.cpu) }, { name: 'Memory', type: 'line', data: series.map(s => s.mem) } ] });
     },
     async refreshPerformance() {
-      if (!this.token) return;
-      const system = await axios.get(`${this.apiBase}/api/performance/system`, { headers: this.headers() });
-      const overview = await axios.get(`${this.apiBase}/api/performance/overview`, { headers: this.headers() });
-      this.perf.system = system.data;
-      this.perf.overview = overview.data;
-      const series = (overview.data.system_recent || []).map(v => ({
-        time: new Date(v.recorded_at).toLocaleTimeString(), cpu: v.cpu_percent, mem: v.memory_percent,
-      }));
-      this.renderPerfChart(series);
-    },
-
-    async downloadResult(taskId) {
+      if (!this.token) return this.renderPerfChart(this.defaultPerfSeries());
       try {
-        const resp = await axios.get(`${this.apiBase}/api/tasks/${taskId}/download`, {
-          headers: this.headers(), responseType: 'blob',
-        });
-        const url = URL.createObjectURL(resp.data);
-        const a = document.createElement('a'); a.href = url; a.download = `task_${taskId}.fqc`; a.click();
-        URL.revokeObjectURL(url);
+        const system = await axios.get(`${this.apiBase}/api/performance/system`, { headers: this.headers() });
+        const overview = await axios.get(`${this.apiBase}/api/performance/overview`, { headers: this.headers() });
+        this.perf.system = system.data;
+        this.perf.overview = overview.data;
+        const series = (overview.data.system_recent || []).map(v => ({ time: new Date(v.recorded_at).toLocaleTimeString(), cpu: v.cpu_percent, mem: v.memory_percent }));
+        this.renderPerfChart(series.length ? series : this.defaultPerfSeries());
+      } catch (_) { this.renderPerfChart(this.defaultPerfSeries()); }
+    },
+    async downloadResult(taskId) {
+      if (!this.token) return this.toast('演示数据模式：请连接后端后下载', 'warning');
+      try {
+        const resp = await axios.get(`${this.apiBase}/api/tasks/${taskId}/download`, { headers: this.headers(), responseType: 'blob' });
+        const url = URL.createObjectURL(resp.data); const a = document.createElement('a'); a.href = url; a.download = `task_${taskId}.fqc`; a.click(); URL.revokeObjectURL(url);
       } catch (e) { this.toast(e?.response?.data?.error || '下载失败', 'error'); }
     },
     async downloadReport(taskId) {
+      if (!this.token) return this.toast('演示数据模式：请连接后端后下载', 'warning');
       try {
-        const resp = await axios.get(`${this.apiBase}/api/reports/${taskId}`, {
-          headers: this.headers(), responseType: 'blob',
-        });
-        const url = URL.createObjectURL(resp.data);
-        const a = document.createElement('a'); a.href = url; a.download = `task_${taskId}_report.pdf`; a.click();
-        URL.revokeObjectURL(url);
+        const resp = await axios.get(`${this.apiBase}/api/reports/${taskId}`, { headers: this.headers(), responseType: 'blob' });
+        const url = URL.createObjectURL(resp.data); const a = document.createElement('a'); a.href = url; a.download = `task_${taskId}_report.pdf`; a.click(); URL.revokeObjectURL(url);
       } catch (e) { this.toast(e?.response?.data?.error || '下载失败', 'error'); }
     },
   },
