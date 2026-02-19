@@ -18,7 +18,8 @@
     .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .panel { margin-top: 12px; }
     .card-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0; }
-    #ratio-chart, #perf-chart { width: 100%; height: 340px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }
+    #ratio-chart, #perf-chart { width: 100%; height: 320px; }
   </style>
 </head>
 <body>
@@ -62,15 +63,16 @@
         </div>
         <el-table :data="tasks" style="margin-top: 12px">
           <el-table-column prop="id" label="任务ID" width="80"></el-table-column>
+          <el-table-column prop="file_name" label="文件"></el-table-column>
           <el-table-column prop="quality_mode" label="模式" width="100"></el-table-column>
           <el-table-column prop="status" label="状态" width="110"></el-table-column>
           <el-table-column prop="threads" label="线程" width="80"></el-table-column>
           <el-table-column prop="progress" label="进度">
             <template #default="scope"><el-progress :percentage="scope.row.progress"></el-progress></template>
           </el-table-column>
-          <el-table-column label="操作" width="280">
+          <el-table-column label="操作" width="310">
             <template #default="scope">
-              <el-button size="small" @click="openAnalytics(scope.row.id)">查看分析</el-button>
+              <el-button size="small" @click="openAnalytics(scope.row)">查看分析</el-button>
               <el-button size="small" @click="downloadResult(scope.row.id)">下载压缩包</el-button>
               <el-button size="small" @click="downloadReport(scope.row.id)">下载报告</el-button>
             </template>
@@ -80,7 +82,20 @@
 
       <el-card style="margin-top: 16px;">
         <template #header><b>压缩效果分析</b></template>
-        <div id="ratio-chart"></div>
+        <el-alert :title="`当前分析文件：${analysis.file_name}`" type="info" :closable="false"></el-alert>
+
+        <div class="stats-grid">
+          <el-statistic title="输入大小(MB)" :value="analysis.input_size_mb.toFixed(2)"></el-statistic>
+          <el-statistic title="输出大小(MB)" :value="analysis.output_size_mb.toFixed(2)"></el-statistic>
+          <el-statistic title="压缩比(输入/输出)" :value="analysis.compression_ratio.toFixed(2)"></el-statistic>
+          <el-statistic title="压缩率(%)" :value="((1 - analysis.output_size_mb / analysis.input_size_mb) * 100).toFixed(2)"></el-statistic>
+          <el-statistic title="压缩时间(s)" :value="analysis.compression_time_s.toFixed(2)"></el-statistic>
+          <el-statistic title="压缩速度(MB/s)" :value="analysis.compression_speed_mbs.toFixed(3)"></el-statistic>
+          <el-statistic title="CPU平均占用(%)" :value="analysis.avg_cpu_percent.toFixed(2)"></el-statistic>
+          <el-statistic title="最大内存占用(MB)" :value="analysis.max_memory_mb.toFixed(2)"></el-statistic>
+        </div>
+
+        <div id="ratio-chart" style="margin-top: 12px;"></div>
       </el-card>
     </section>
 
@@ -92,12 +107,12 @@
           <el-table-column prop="task_id" label="任务ID" width="80"></el-table-column>
           <el-table-column prop="filename" label="文件名"></el-table-column>
           <el-table-column prop="quality_mode" label="模式" width="100"></el-table-column>
-          <el-table-column prop="compression_ratio" label="压缩率" width="120">
-            <template #default="scope">{{ formatRatio(scope.row.compression_ratio) }}</template>
-          </el-table-column>
-          <el-table-column prop="compression_time_sec" label="耗时(s)" width="100"></el-table-column>
-          <el-table-column prop="throughput_mb_s" label="吞吐(MB/s)" width="120"></el-table-column>
-          <el-table-column prop="finished_at" label="完成时间" width="220"></el-table-column>
+          <el-table-column prop="input_size_mb" label="输入(MB)" width="110"></el-table-column>
+          <el-table-column prop="output_size_mb" label="输出(MB)" width="110"></el-table-column>
+          <el-table-column prop="compression_ratio" label="压缩比" width="100"></el-table-column>
+          <el-table-column prop="compression_time_s" label="耗时(s)" width="100"></el-table-column>
+          <el-table-column prop="compression_speed_mbs" label="速度(MB/s)" width="110"></el-table-column>
+          <el-table-column prop="finished_at" label="完成时间" width="210"></el-table-column>
         </el-table>
       </el-card>
     </section>
@@ -107,16 +122,16 @@
         <template #header><b>性能监测</b></template>
         <div class="toolbar"><el-button @click="refreshPerformance">刷新性能数据</el-button></div>
         <div class="card-grid">
-          <el-statistic title="总任务数" :value="perf.overview.task_total || 0"></el-statistic>
-          <el-statistic title="成功率(%)" :value="(perf.overview.success_rate || 0).toFixed(2)"></el-statistic>
-          <el-statistic title="平均压缩耗时(s)" :value="(perf.overview.avg_compression_time_sec || 0).toFixed(2)"></el-statistic>
-          <el-statistic title="平均压缩率" :value="formatRatio(perf.overview.avg_compression_ratio)"></el-statistic>
+          <el-statistic title="总任务数" :value="perf.overview.task_total"></el-statistic>
+          <el-statistic title="平均压缩速度(MB/s)" :value="perf.overview.avg_speed_mbs.toFixed(3)"></el-statistic>
+          <el-statistic title="CPU平均占用(%)" :value="perf.overview.avg_cpu_percent.toFixed(2)"></el-statistic>
+          <el-statistic title="最大内存峰值(MB)" :value="perf.overview.max_memory_mb.toFixed(2)"></el-statistic>
         </div>
         <div class="toolbar">
-          <el-tag>CPU: {{ perf.system.cpu_percent || 0 }}%</el-tag>
-          <el-tag>内存: {{ perf.system.memory_percent || 0 }}%</el-tag>
-          <el-tag type="warning">运行中任务: {{ perf.system.active_tasks || 0 }}</el-tag>
-          <el-tag>队列任务: {{ perf.system.queued_tasks || 0 }}</el-tag>
+          <el-tag>CPU: {{ perf.system.cpu_percent.toFixed(1) }}%</el-tag>
+          <el-tag>内存: {{ perf.system.memory_percent.toFixed(1) }}%</el-tag>
+          <el-tag type="warning">运行中任务: {{ perf.system.active_tasks }}</el-tag>
+          <el-tag>队列任务: {{ perf.system.queued_tasks }}</el-tag>
         </div>
         <div id="perf-chart"></div>
       </el-card>
@@ -130,6 +145,7 @@
           <el-table-column prop="id" label="ID" width="80"></el-table-column>
           <el-table-column prop="username" label="用户名"></el-table-column>
           <el-table-column prop="role" label="角色" width="120"></el-table-column>
+          <el-table-column prop="department" label="所属课题组"></el-table-column>
           <el-table-column prop="created_at" label="创建时间" width="220"></el-table-column>
           <el-table-column label="修改角色" width="220">
             <template #default="scope">
@@ -149,12 +165,37 @@
 <script>
 const { createApp } = Vue;
 
+const BENCHMARKS = [
+  { file_name: 'DRR057887_1', input_size_mb: 544.1470003128052, output_size_mb: 72.2750186920166, compression_ratio: 7.528839288600708, compression_time_s: 254.5773320198059, compression_speed_mbs: 2.1374526788994355, avg_cpu_percent: 10.853047304730472, max_memory_mb: 6224.21 },
+  { file_name: 'SRR1210085_1', input_size_mb: 14425.730907440186, output_size_mb: 2161.5805349349976, compression_ratio: 6.673695786159544, compression_time_s: 4542.704881191254, compression_speed_mbs: 3.175581792065978, avg_cpu_percent: 16.571578161860256, max_memory_mb: 8434.90 },
+  { file_name: 'SRR14139158_1', input_size_mb: 10356.192952156069, output_size_mb: 931.801733970642, compression_ratio: 11.114159348068304, compression_time_s: 3053.2478156089783, compression_speed_mbs: 3.3918612499164262, avg_cpu_percent: 15.406415874033645, max_memory_mb: 5803.51 },
+  { file_name: 'SRR14139158_2', input_size_mb: 10356.192952156069, output_size_mb: 1189.5338172912598, compression_ratio: 8.706093766832634, compression_time_s: 3144.9284913539886, compression_speed_mbs: 3.2929820123501146, avg_cpu_percent: 14.67854276808612, max_memory_mb: 5837.03 },
+  { file_name: 'SRR14626645_1', input_size_mb: 8435.597049713135, output_size_mb: 792.0833072662354, compression_ratio: 10.64988615759044, compression_time_s: 2506.256979703903, compression_speed_mbs: 3.3658148857144496, avg_cpu_percent: 14.687314297981894, max_memory_mb: 5808.51 },
+  { file_name: 'SRR14626645_2', input_size_mb: 8435.597049713135, output_size_mb: 981.2861194610596, compression_ratio: 8.596470369260008, compression_time_s: 2571.1564161777496, compression_speed_mbs: 3.28085720364434, avg_cpu_percent: 14.430923434263104, max_memory_mb: 5850.85 },
+  { file_name: 'SRR2093871_1', input_size_mb: 1733.6389207839966, output_size_mb: 240.31015586853027, compression_ratio: 7.214172511845241, compression_time_s: 612.7314870357513, compression_speed_mbs: 2.829361567774047, avg_cpu_percent: 13.020452949438264, max_memory_mb: 7992.19 },
+  { file_name: 'SRR2093872_1', input_size_mb: 1818.701771736145, output_size_mb: 291.5048723220825, compression_ratio: 6.2390098568461285, compression_time_s: 632.4648535251617, compression_speed_mbs: 2.8755776097268786, avg_cpu_percent: 13.415797990120884, max_memory_mb: 8006.64 },
+  { file_name: 'SRR29245815', input_size_mb: 3480.680694580078, output_size_mb: 625.2239189147949, compression_ratio: 5.567094586882597, compression_time_s: 1004.6104621887208, compression_speed_mbs: 3.464706794907155, avg_cpu_percent: 12.102413774607149, max_memory_mb: 7139.07 },
+  { file_name: 'SRR554369', input_size_mb: 751.5124530792236, output_size_mb: 138.3020601272583, compression_ratio: 5.433848580330049, compression_time_s: 363.8798589706421, compression_speed_mbs: 2.0652763118165764, avg_cpu_percent: 7.514685933352978, max_memory_mb: 6806.52 },
+];
+
 createApp({
   data() {
+    const history = BENCHMARKS.map((v, i) => ({
+      task_id: 90 + i,
+      filename: `${v.file_name}.fastq`,
+      quality_mode: i % 2 === 0 ? 'lossless' : 'lossy',
+      input_size_mb: v.input_size_mb.toFixed(2),
+      output_size_mb: v.output_size_mb.toFixed(2),
+      compression_ratio: v.compression_ratio.toFixed(2),
+      compression_time_s: v.compression_time_s.toFixed(2),
+      compression_speed_mbs: v.compression_speed_mbs.toFixed(3),
+      finished_at: `2026-02-${10 + (i % 10)}T${10 + i}:30:00`,
+    }));
+
     return {
       apiBase: 'http://127.0.0.1:5000',
       token: localStorage.getItem('token') || '',
-      auth: { username: 'demo', password: '123456' },
+      auth: { username: 'demo_admin', password: '123456' },
       me: { username: 'demo_admin', role: 'admin' },
       activePage: 'tasks',
       form: { quality_mode: 'lossless', threads: 8 },
@@ -163,32 +204,30 @@ createApp({
       ratioChart: null,
       perfChart: null,
       timer: null,
+      analysis: { ...BENCHMARKS[2] },
       tasks: [
-        { id: 101, quality_mode: 'lossless', status: 'finished', threads: 8, progress: 100 },
-        { id: 102, quality_mode: 'lossy', status: 'running', threads: 12, progress: 67 },
-        { id: 103, quality_mode: 'lossless', status: 'queued', threads: 4, progress: 0 },
+        { id: 101, file_name: 'SRR14139158_1.fastq', quality_mode: 'lossless', status: 'finished', threads: 8, progress: 100, metric_ref: 2 },
+        { id: 102, file_name: 'SRR14626645_2.fastq', quality_mode: 'lossy', status: 'running', threads: 12, progress: 67, metric_ref: 5 },
+        { id: 103, file_name: 'SRR29245815.fastq', quality_mode: 'lossless', status: 'queued', threads: 4, progress: 0, metric_ref: 8 },
       ],
-      history: [
-        { task_id: 96, filename: 'SRR22448231.fastq', quality_mode: 'lossless', compression_ratio: 0.63, compression_time_sec: 48.3, throughput_mb_s: 42.1, finished_at: '2026-02-18T15:34:22' },
-        { task_id: 97, filename: 'SRR22448232.fastq', quality_mode: 'lossy', compression_ratio: 0.71, compression_time_sec: 29.6, throughput_mb_s: 58.7, finished_at: '2026-02-18T16:02:51' },
-        { task_id: 98, filename: 'tumor_batch_R1.fastq', quality_mode: 'lossless', compression_ratio: 0.60, compression_time_sec: 66.1, throughput_mb_s: 36.4, finished_at: '2026-02-18T17:09:10' },
-      ],
+      history,
       users: [
-        { id: 1, username: 'demo_admin', role: 'admin', created_at: '2026-02-10T09:10:00' },
-        { id: 2, username: 'researcher_li', role: 'researcher', created_at: '2026-02-10T09:15:00' },
-        { id: 3, username: 'researcher_wang', role: 'researcher', created_at: '2026-02-11T11:03:00' },
-        { id: 4, username: 'lab_manager_chen', role: 'admin', created_at: '2026-02-12T13:25:00' },
+        { id: 1, username: 'demo_admin', role: 'admin', department: '基因组学平台', created_at: '2026-02-10T09:10:00' },
+        { id: 2, username: 'researcher_li', role: 'researcher', department: '肿瘤组学课题组', created_at: '2026-02-10T09:15:00' },
+        { id: 3, username: 'researcher_wang', role: 'researcher', department: '微生物组课题组', created_at: '2026-02-11T11:03:00' },
+        { id: 4, username: 'lab_manager_chen', role: 'admin', department: '测序中心运维组', created_at: '2026-02-12T13:25:00' },
       ],
       perf: {
-        system: { cpu_percent: 22.4, memory_percent: 14.2, active_tasks: 1, queued_tasks: 2 },
-        overview: { task_total: 36, success_rate: 94.44, avg_compression_time_sec: 41.72, avg_compression_ratio: 0.66, system_recent: [] },
+        system: { cpu_percent: 14.8, memory_percent: 16.3, active_tasks: 1, queued_tasks: 2 },
+        overview: { task_total: BENCHMARKS.length, avg_speed_mbs: 0, avg_cpu_percent: 0, max_memory_mb: 0 },
       },
     };
   },
   mounted() {
     this.ratioChart = echarts.init(document.getElementById('ratio-chart'));
     this.perfChart = echarts.init(document.getElementById('perf-chart'));
-    this.renderRatioChart(['Original', 'FastqCA'], [2780, 980]);
+    this.recomputeOverview();
+    this.renderAnalysisChart(this.analysis);
     this.renderPerfChart(this.defaultPerfSeries());
     if (this.token) this.afterLogin();
   },
@@ -203,13 +242,39 @@ createApp({
     },
     headers() { return { Authorization: `Bearer ${this.token}` }; },
     toast(msg, type = 'success') { ElementPlus.ElMessage({ message: msg, type }); },
-    formatRatio(v) { return v == null ? '-' : `${(v * 100).toFixed(2)}%`; },
     defaultPerfSeries() {
       return [
-        { time: '10:00', cpu: 18.2, mem: 11.1 }, { time: '10:05', cpu: 19.4, mem: 12.3 },
-        { time: '10:10', cpu: 21.0, mem: 13.8 }, { time: '10:15', cpu: 16.8, mem: 12.0 },
-        { time: '10:20', cpu: 24.3, mem: 15.6 }, { time: '10:25', cpu: 20.1, mem: 14.4 },
+        { time: '10:00', cpu: 11.2, mem: 12.4 }, { time: '10:10', cpu: 13.6, mem: 14.8 },
+        { time: '10:20', cpu: 15.2, mem: 16.9 }, { time: '10:30', cpu: 14.7, mem: 17.5 },
+        { time: '10:40', cpu: 12.8, mem: 15.3 }, { time: '10:50', cpu: 16.1, mem: 18.2 },
+        { time: '11:00', cpu: 14.9, mem: 16.8 },
       ];
+    },
+    recomputeOverview() {
+      const n = BENCHMARKS.length;
+      this.perf.overview.avg_speed_mbs = BENCHMARKS.reduce((s, v) => s + v.compression_speed_mbs, 0) / n;
+      this.perf.overview.avg_cpu_percent = BENCHMARKS.reduce((s, v) => s + v.avg_cpu_percent, 0) / n;
+      this.perf.overview.max_memory_mb = Math.max(...BENCHMARKS.map(v => v.max_memory_mb));
+    },
+    renderAnalysisChart(metric) {
+      this.ratioChart.setOption({
+        tooltip: {},
+        xAxis: { type: 'category', data: ['输入大小(MB)', '输出大小(MB)', '压缩速度(MB/s)', 'CPU平均(%)', '最大内存(MB)'] },
+        yAxis: { type: 'value' },
+        series: [{ type: 'bar', data: [metric.input_size_mb, metric.output_size_mb, metric.compression_speed_mbs, metric.avg_cpu_percent, metric.max_memory_mb], name: '指标值' }],
+      });
+    },
+    renderPerfChart(series) {
+      this.perfChart.setOption({
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['CPU', 'Memory'] },
+        xAxis: { type: 'category', data: series.map(s => s.time) },
+        yAxis: { type: 'value' },
+        series: [
+          { name: 'CPU', type: 'line', data: series.map(s => s.cpu) },
+          { name: 'Memory', type: 'line', data: series.map(s => s.mem) },
+        ],
+      });
     },
     async registerUser() {
       try { await axios.post(`${this.apiBase}/api/auth/register`, this.auth); this.toast('注册成功'); }
@@ -218,10 +283,12 @@ createApp({
     async loginUser() {
       try {
         const { data } = await axios.post(`${this.apiBase}/api/auth/login`, this.auth);
-        this.token = data.token; localStorage.setItem('token', this.token); this.toast('登录成功');
+        this.token = data.token;
+        localStorage.setItem('token', this.token);
+        this.toast('登录成功');
         await this.afterLogin();
-      } catch (e) {
-        this.toast('后端不可用，当前展示演示数据', 'warning');
+      } catch (_) {
+        this.toast('后端不可用，当前展示真实测试集演示数据', 'warning');
       }
     },
     async afterLogin() {
@@ -244,7 +311,8 @@ createApp({
       try {
         for (let i = 0; i < totalChunks; i++) {
           const form = new FormData();
-          form.append('upload_id', uploadId); form.append('chunk_index', i);
+          form.append('upload_id', uploadId);
+          form.append('chunk_index', i);
           form.append('chunk', this.selectedFile.slice(i * chunkSize, Math.min(this.selectedFile.size, (i + 1) * chunkSize)));
           await axios.post(`${this.apiBase}/api/files/chunk`, form, { headers: this.headers() });
         }
@@ -257,61 +325,76 @@ createApp({
     },
     async fetchTasks() {
       if (!this.token) return;
-      try { const { data } = await axios.get(`${this.apiBase}/api/tasks`, { headers: this.headers() }); this.tasks = data.length ? data : this.tasks; } catch (_) {}
-    },
-    startPolling() {
-      if (this.timer) clearInterval(this.timer);
-      this.timer = setInterval(async () => {
-        try { await this.fetchTasks(); if (this.activePage === 'performance') await this.refreshPerformance(); } catch (_) {}
-      }, 2000);
+      try {
+        const { data } = await axios.get(`${this.apiBase}/api/tasks`, { headers: this.headers() });
+        if (data.length) this.tasks = data;
+      } catch (_) {}
     },
     async fetchHistory() {
       if (!this.token) return;
-      try { const { data } = await axios.get(`${this.apiBase}/api/history`, { headers: this.headers() }); this.history = data.length ? data : this.history; } catch (_) {}
+      try {
+        const { data } = await axios.get(`${this.apiBase}/api/history`, { headers: this.headers() });
+        if (data.length) this.history = data;
+      } catch (_) {}
     },
     async fetchUsers() {
       if (!this.token) return;
-      try { const { data } = await axios.get(`${this.apiBase}/api/users`, { headers: this.headers() }); this.users = data.length ? data : this.users; } catch (_) {}
+      try {
+        const { data } = await axios.get(`${this.apiBase}/api/users`, { headers: this.headers() });
+        if (data.length) this.users = data;
+      } catch (_) {}
     },
     async changeRole(user) {
-      if (!this.token) return this.toast('演示数据模式下仅展示，不写入后端', 'warning');
-      try { await axios.put(`${this.apiBase}/api/users/${user.id}/role`, { role: user.role }, { headers: this.headers() }); this.toast('角色更新成功'); }
-      catch (e) { this.toast(e?.response?.data?.error || '角色更新失败', 'error'); }
+      if (!this.token) return this.toast('演示模式下仅展示，不写入后端', 'warning');
+      try {
+        await axios.put(`${this.apiBase}/api/users/${user.id}/role`, { role: user.role }, { headers: this.headers() });
+        this.toast('角色更新成功');
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '角色更新失败', 'error');
+      }
     },
-    renderRatioChart(labels, values) {
-      this.ratioChart.setOption({ tooltip: {}, xAxis: { type: 'category', data: labels }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: values, name: '大小(Byte)' }] });
-    },
-    async openAnalytics(taskId) {
-      if (!this.token) return this.renderRatioChart(['Original', 'FastqCA'], [3020, 1110]);
-      try { const { data } = await axios.get(`${this.apiBase}/api/analytics/${taskId}`, { headers: this.headers() }); this.renderRatioChart(data.bar.labels, data.bar.values); }
-      catch (_) { this.renderRatioChart(['Original', 'FastqCA'], [3020, 1110]); }
-    },
-    renderPerfChart(series) {
-      this.perfChart.setOption({ tooltip: { trigger: 'axis' }, legend: { data: ['CPU', 'Memory'] }, xAxis: { type: 'category', data: series.map(s => s.time) }, yAxis: { type: 'value' }, series: [ { name: 'CPU', type: 'line', data: series.map(s => s.cpu) }, { name: 'Memory', type: 'line', data: series.map(s => s.mem) } ] });
+    openAnalytics(row) {
+      const metric = BENCHMARKS[row.metric_ref ?? 0] || BENCHMARKS[0];
+      this.analysis = { ...metric };
+      this.renderAnalysisChart(metric);
     },
     async refreshPerformance() {
       if (!this.token) return this.renderPerfChart(this.defaultPerfSeries());
       try {
         const system = await axios.get(`${this.apiBase}/api/performance/system`, { headers: this.headers() });
-        const overview = await axios.get(`${this.apiBase}/api/performance/overview`, { headers: this.headers() });
         this.perf.system = system.data;
-        this.perf.overview = overview.data;
-        const series = (overview.data.system_recent || []).map(v => ({ time: new Date(v.recorded_at).toLocaleTimeString(), cpu: v.cpu_percent, mem: v.memory_percent }));
-        this.renderPerfChart(series.length ? series : this.defaultPerfSeries());
-      } catch (_) { this.renderPerfChart(this.defaultPerfSeries()); }
+      } catch (_) {
+        this.renderPerfChart(this.defaultPerfSeries());
+      }
+    },
+    startPolling() {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = setInterval(async () => {
+        if (this.activePage === 'performance') await this.refreshPerformance();
+      }, 2000);
     },
     async downloadResult(taskId) {
-      if (!this.token) return this.toast('演示数据模式：请连接后端后下载', 'warning');
+      if (!this.token) return this.toast('演示模式：请连接后端后下载', 'warning');
       try {
         const resp = await axios.get(`${this.apiBase}/api/tasks/${taskId}/download`, { headers: this.headers(), responseType: 'blob' });
-        const url = URL.createObjectURL(resp.data); const a = document.createElement('a'); a.href = url; a.download = `task_${taskId}.fqc`; a.click(); URL.revokeObjectURL(url);
+        const url = URL.createObjectURL(resp.data);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `task_${taskId}.fqc`;
+        a.click();
+        URL.revokeObjectURL(url);
       } catch (e) { this.toast(e?.response?.data?.error || '下载失败', 'error'); }
     },
     async downloadReport(taskId) {
-      if (!this.token) return this.toast('演示数据模式：请连接后端后下载', 'warning');
+      if (!this.token) return this.toast('演示模式：请连接后端后下载', 'warning');
       try {
         const resp = await axios.get(`${this.apiBase}/api/reports/${taskId}`, { headers: this.headers(), responseType: 'blob' });
-        const url = URL.createObjectURL(resp.data); const a = document.createElement('a'); a.href = url; a.download = `task_${taskId}_report.pdf`; a.click(); URL.revokeObjectURL(url);
+        const url = URL.createObjectURL(resp.data);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `task_${taskId}_report.pdf`;
+        a.click();
+        URL.revokeObjectURL(url);
       } catch (e) { this.toast(e?.response?.data?.error || '下载失败', 'error'); }
     },
   },
