@@ -309,6 +309,9 @@ createApp({
 
       this.perfChart.clear();
       this.perfChart.setOption({
+        animation: false,
+        animationDuration: 0,
+        animationDurationUpdate: 0,
         grid: { left: 50, right: 20, top: 40, bottom: 40, containLabel: true },
         tooltip: { trigger: 'axis' },
         legend: { data: ['CPU', 'Memory'] },
