@@ -244,10 +244,16 @@ createApp({
     toast(msg, type = 'success') { ElementPlus.ElMessage({ message: msg, type }); },
     defaultPerfSeries() {
       return [
-        { time: '10:00', cpu: 11.2, mem: 12.4 }, { time: '10:10', cpu: 13.6, mem: 14.8 },
-        { time: '10:20', cpu: 15.2, mem: 16.9 }, { time: '10:30', cpu: 14.7, mem: 17.5 },
-        { time: '10:40', cpu: 12.8, mem: 15.3 }, { time: '10:50', cpu: 16.1, mem: 18.2 },
-        { time: '11:00', cpu: 14.9, mem: 16.8 },
+        { time: '10:00:00', cpu: 11.2, mem: 12.4 },
+        { time: '10:05:00', cpu: 12.1, mem: 13.0 },
+        { time: '10:10:00', cpu: 13.6, mem: 14.8 },
+        { time: '10:15:00', cpu: 14.4, mem: 15.5 },
+        { time: '10:20:00', cpu: 15.2, mem: 16.9 },
+        { time: '10:25:00', cpu: 14.7, mem: 17.5 },
+        { time: '10:30:00', cpu: 12.8, mem: 15.3 },
+        { time: '10:35:00', cpu: 16.1, mem: 18.2 },
+        { time: '10:40:00', cpu: 14.9, mem: 16.8 },
+        { time: '10:45:00', cpu: 13.7, mem: 15.9 },
       ];
     },
     recomputeOverview() {
@@ -270,7 +276,15 @@ createApp({
         cpu: Math.max(0, Math.min(100, Number(s.cpu) || 0)),
         mem: Math.max(0, Math.min(100, Number(s.mem) || 0)),
       }));
-      const allValues = normalized.flatMap(v => [v.cpu, v.mem]);
+      const seen = {};
+      const labeled = normalized.map((v, i) => {
+        const base = String(v.time);
+        seen[base] = (seen[base] || 0) + 1;
+        const suffix = seen[base] > 1 ? `(${seen[base]})` : '';
+        const label = `${i + 1}. ${base}${suffix}`;
+        return { ...v, label, idx: i + 1 };
+      });
+      const allValues = labeled.flatMap(v => [v.cpu, v.mem]);
       const maxVal = allValues.length ? Math.max(...allValues) : 20;
       const axisMax = Math.max(20, Math.ceil((maxVal + 2) / 5) * 5);
 
@@ -279,11 +293,16 @@ createApp({
         grid: { left: 50, right: 20, top: 40, bottom: 40, containLabel: true },
         tooltip: { trigger: 'axis' },
         legend: { data: ['CPU', 'Memory'] },
-        xAxis: { type: 'category', boundaryGap: false, data: normalized.map(s => s.time) },
+        xAxis: {
+          type: 'category',
+          boundaryGap: false,
+          data: labeled.map(s => s.label),
+          axisLabel: { interval: 0, rotate: 35 }
+        },
         yAxis: { type: 'value', min: 0, max: axisMax, axisLabel: { formatter: '{value}%' } },
         series: [
-          { name: 'CPU', type: 'line', smooth: true, data: normalized.map(s => s.cpu) },
-          { name: 'Memory', type: 'line', smooth: true, data: normalized.map(s => s.mem) },
+          { name: 'CPU', type: 'line', smooth: true, data: labeled.map(s => s.cpu) },
+          { name: 'Memory', type: 'line', smooth: true, data: labeled.map(s => s.mem) },
         ],
       });
     },
@@ -377,11 +396,17 @@ createApp({
         const overview = await axios.get(`${this.apiBase}/api/performance/overview`, { headers: this.headers() });
         if (overview?.data) {
           const recent = (overview.data.system_recent || []).map(v => ({
-            time: new Date(v.recorded_at).toLocaleTimeString(),
+            time: new Date(v.recorded_at).toLocaleTimeString('zh-CN', { hour12: false }),
             cpu: Number(v.cpu_percent) || 0,
             mem: Number(v.memory_percent) || 0,
           }));
-          if (recent.length) this.renderPerfChart(recent);
+          if (recent.length >= 10) {
+            this.renderPerfChart(recent.slice(-10));
+          } else if (recent.length > 0) {
+            const fallback = this.defaultPerfSeries();
+            const merged = fallback.slice(0, 10 - recent.length).concat(recent);
+            this.renderPerfChart(merged);
+          }
         }
       } catch (_) {
         this.renderPerfChart(this.defaultPerfSeries());
