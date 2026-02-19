@@ -270,11 +270,22 @@ createApp({
       this.perf.overview.max_memory_mb = Math.max(...BENCHMARKS.map(v => v.max_memory_mb));
     },
     renderAnalysisChart(metric) {
+      const categories = ['输入大小(MB)', '输出大小(MB)', '压缩速度(MB/s)', 'CPU平均(%)', '最大内存(MB)'];
+      const largeValues = [metric.input_size_mb, metric.output_size_mb, null, null, metric.max_memory_mb];
+      const smallValues = [null, null, metric.compression_speed_mbs, metric.avg_cpu_percent, null];
+
       this.ratioChart.setOption({
-        tooltip: {},
-        xAxis: { type: 'category', data: ['输入大小(MB)', '输出大小(MB)', '压缩速度(MB/s)', 'CPU平均(%)', '最大内存(MB)'] },
-        yAxis: { type: 'value' },
-        series: [{ type: 'bar', data: [metric.input_size_mb, metric.output_size_mb, metric.compression_speed_mbs, metric.avg_cpu_percent, metric.max_memory_mb], name: '指标值' }],
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['体量指标', '效率指标'] },
+        xAxis: { type: 'category', data: categories },
+        yAxis: [
+          { type: 'value', name: '体量(MB)', min: 0 },
+          { type: 'value', name: '效率(速度/CPU)', min: 0, max: Math.max(20, Math.ceil((Math.max(metric.compression_speed_mbs, metric.avg_cpu_percent) + 5) / 5) * 5) },
+        ],
+        series: [
+          { name: '体量指标', type: 'bar', yAxisIndex: 0, data: largeValues, itemStyle: { color: '#409EFF' } },
+          { name: '效率指标', type: 'bar', yAxisIndex: 1, data: smallValues, itemStyle: { color: '#67C23A' } },
+        ],
       });
     },
     renderPerfChart(series) {

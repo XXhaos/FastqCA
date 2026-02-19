@@ -60,7 +60,17 @@ shots = [
 with sync_playwright() as p:
     browser = p.chromium.launch()
     page = browser.new_page(viewport={"width": 1680, "height": 980})
-    page.goto(f"http://127.0.0.1:{port}", wait_until="networkidle", timeout=90000)
+    target_urls = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+    last_error = None
+    for url in target_urls:
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_selector(".el-menu", timeout=15000)
+            break
+        except Exception as exc:
+            last_error = exc
+    else:
+        raise last_error
     page.wait_for_timeout(1200)
 
     for text, filename in shots:
