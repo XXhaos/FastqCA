@@ -265,14 +265,25 @@ createApp({
       });
     },
     renderPerfChart(series) {
+      const normalized = (series || []).map((s, i) => ({
+        time: s.time || `T${i + 1}`,
+        cpu: Math.max(0, Math.min(100, Number(s.cpu) || 0)),
+        mem: Math.max(0, Math.min(100, Number(s.mem) || 0)),
+      }));
+      const allValues = normalized.flatMap(v => [v.cpu, v.mem]);
+      const maxVal = allValues.length ? Math.max(...allValues) : 20;
+      const axisMax = Math.max(20, Math.ceil((maxVal + 2) / 5) * 5);
+
+      this.perfChart.clear();
       this.perfChart.setOption({
+        grid: { left: 50, right: 20, top: 40, bottom: 40, containLabel: true },
         tooltip: { trigger: 'axis' },
         legend: { data: ['CPU', 'Memory'] },
-        xAxis: { type: 'category', data: series.map(s => s.time) },
-        yAxis: { type: 'value' },
+        xAxis: { type: 'category', boundaryGap: false, data: normalized.map(s => s.time) },
+        yAxis: { type: 'value', min: 0, max: axisMax, axisLabel: { formatter: '{value}%' } },
         series: [
-          { name: 'CPU', type: 'line', data: series.map(s => s.cpu) },
-          { name: 'Memory', type: 'line', data: series.map(s => s.mem) },
+          { name: 'CPU', type: 'line', smooth: true, data: normalized.map(s => s.cpu) },
+          { name: 'Memory', type: 'line', smooth: true, data: normalized.map(s => s.mem) },
         ],
       });
     },
@@ -363,6 +374,15 @@ createApp({
       try {
         const system = await axios.get(`${this.apiBase}/api/performance/system`, { headers: this.headers() });
         this.perf.system = system.data;
+        const overview = await axios.get(`${this.apiBase}/api/performance/overview`, { headers: this.headers() });
+        if (overview?.data) {
+          const recent = (overview.data.system_recent || []).map(v => ({
+            time: new Date(v.recorded_at).toLocaleTimeString(),
+            cpu: Number(v.cpu_percent) || 0,
+            mem: Number(v.memory_percent) || 0,
+          }));
+          if (recent.length) this.renderPerfChart(recent);
+        }
       } catch (_) {
         this.renderPerfChart(this.defaultPerfSeries());
       }
