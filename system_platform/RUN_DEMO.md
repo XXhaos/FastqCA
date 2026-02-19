@@ -50,3 +50,27 @@ python3 -m http.server 4173
 ## 6. 注意事项
 - 若数据库是旧版本结构，删除 `system_platform/backend/instance/fastqca_platform.db` 后重启。
 - FastqCA 压缩调用 `main_new.py`，请确保仓库根目录 `lpaq8` 可执行。
+
+## 7. 一键生成四个演示页面截图（本机 Ubuntu）
+脚本位置：`system_platform/scripts/capture_demo_screenshots.sh`
+
+```bash
+cd /workspace/FastqCA
+bash system_platform/scripts/capture_demo_screenshots.sh
+```
+
+可选：指定输出目录
+
+```bash
+bash system_platform/scripts/capture_demo_screenshots.sh /tmp/fastqca_demo_shots
+```
+
+脚本会自动完成：
+1. 安装 Python Playwright（若未安装）。
+2. 安装 Chromium 驱动（若未安装）。
+3. 启动前端静态服务。
+4. 自动切换四个模块并导出截图：
+   - `tasks.png`
+   - `history.png`
+   - `performance.png`
+   - `users.png`
