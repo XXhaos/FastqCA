@@ -203,7 +203,6 @@ createApp({
       uploading: false,
       ratioChart: null,
       perfChart: null,
-      timer: null,
       analysis: { ...BENCHMARKS[2] },
       tasks: [
         { id: 101, file_name: 'SRR14139158_1.fastq', quality_mode: 'lossless', status: 'finished', threads: 8, progress: 100, metric_ref: 2 },
@@ -223,21 +222,29 @@ createApp({
       },
     };
   },
-  mounted() {
-    this.ratioChart = echarts.init(document.getElementById('ratio-chart'));
-    this.perfChart = echarts.init(document.getElementById('perf-chart'));
-    this.recomputeOverview();
-    this.renderAnalysisChart(this.analysis);
-    this.renderPerfChart(this.defaultPerfSeries());
-    if (this.token) this.afterLogin();
-  },
-  beforeUnmount() { if (this.timer) clearInterval(this.timer); },
+    mounted() {
+      this.ratioChart = echarts.init(document.getElementById('ratio-chart'));
+      this.recomputeOverview();
+      this.renderAnalysisChart(this.analysis);
+      this.$nextTick(() => {
+        this.perfChart = echarts.init(document.getElementById('perf-chart'));
+        this.renderPerfChart(this.defaultPerfSeries());
+      });
+      if (this.token) this.afterLogin();
+    },
+    beforeUnmount() { if (this.perfChart) this.perfChart.dispose(); },
   methods: {
     onSelectPage(page) {
       this.activePage = page;
       setTimeout(() => {
         if (page === 'tasks') this.ratioChart.resize();
-        if (page === 'performance') this.perfChart.resize();
+        if (page === 'performance') {
+          if (!this.perfChart) {
+            this.perfChart = echarts.init(document.getElementById('perf-chart'));
+          }
+          this.renderPerfChart(this.defaultPerfSeries());
+          this.perfChart.resize();
+        }
       }, 50);
     },
     headers() { return { Authorization: `Bearer ${this.token}` }; },
@@ -271,6 +278,7 @@ createApp({
       });
     },
     renderPerfChart(series) {
+      if (!this.perfChart) return;
       const normalized = (series || []).map((s, i) => ({
         time: s.time || `T${i + 1}`,
         cpu: Math.max(0, Math.min(100, Number(s.cpu) || 0)),
@@ -297,7 +305,7 @@ createApp({
           type: 'category',
           boundaryGap: false,
           data: labeled.map(s => s.label),
-          axisLabel: { interval: 0, rotate: 35 }
+          axisLabel: { interval: 0, rotate: 0 }
         },
         yAxis: { type: 'value', min: 0, max: axisMax, axisLabel: { formatter: '{value}%' } },
         series: [
@@ -389,35 +397,10 @@ createApp({
       this.renderAnalysisChart(metric);
     },
     async refreshPerformance() {
-      if (!this.token) return this.renderPerfChart(this.defaultPerfSeries());
-      try {
-        const system = await axios.get(`${this.apiBase}/api/performance/system`, { headers: this.headers() });
-        this.perf.system = system.data;
-        const overview = await axios.get(`${this.apiBase}/api/performance/overview`, { headers: this.headers() });
-        if (overview?.data) {
-          const recent = (overview.data.system_recent || []).map(v => ({
-            time: new Date(v.recorded_at).toLocaleTimeString('zh-CN', { hour12: false }),
-            cpu: Number(v.cpu_percent) || 0,
-            mem: Number(v.memory_percent) || 0,
-          }));
-          if (recent.length >= 10) {
-            this.renderPerfChart(recent.slice(-10));
-          } else if (recent.length > 0) {
-            const fallback = this.defaultPerfSeries();
-            const merged = fallback.slice(0, 10 - recent.length).concat(recent);
-            this.renderPerfChart(merged);
-          }
-        }
-      } catch (_) {
-        this.renderPerfChart(this.defaultPerfSeries());
-      }
+      // 论文演示模式：性能监测固定展示前端内置数据，不依赖后端返回。
+      this.renderPerfChart(this.defaultPerfSeries());
     },
-    startPolling() {
-      if (this.timer) clearInterval(this.timer);
-      this.timer = setInterval(async () => {
-        if (this.activePage === 'performance') await this.refreshPerformance();
-      }, 2000);
-    },
+    startPolling() {},
     async downloadResult(taskId) {
       if (!this.token) return this.toast('演示模式：请连接后端后下载', 'warning');
       try {
