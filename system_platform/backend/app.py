@@ -1,7 +1,9 @@
 import os
+import shutil
 from datetime import datetime
 
 from flask import Flask, g, jsonify, request, send_file
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 from auth import create_token, login_required
@@ -20,6 +22,7 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     db.init_app(app)
+    CORS(app)
     ensure_dirs(app)
 
     with app.app_context():
@@ -28,6 +31,8 @@ def create_app():
     @app.post("/api/auth/register")
     def register():
         data = request.get_json() or {}
+        if not data.get("username") or not data.get("password"):
+            return {"error": "username and password required"}, 400
         if User.query.filter_by(username=data.get("username", "")).first():
             return {"error": "username exists"}, 400
         user = User(username=data["username"], role=data.get("role", "researcher"))
@@ -54,7 +59,7 @@ def create_app():
         folder = os.path.join(app.config["CHUNK_DIR"], upload_id)
         os.makedirs(folder, exist_ok=True)
         chunk.save(os.path.join(folder, f"{idx}.part"))
-        return {"message": "chunk received"}
+        return {"message": "chunk received", "chunk_index": int(idx)}
 
     @app.post("/api/files/merge")
     @login_required
@@ -69,15 +74,20 @@ def create_app():
 
         with open(out_path, "wb") as out:
             for i in range(total_chunks):
-                with open(os.path.join(folder, f"{i}.part"), "rb") as part:
-                    out.write(part.read())
+                part_path = os.path.join(folder, f"{i}.part")
+                if not os.path.exists(part_path):
+                    return {"error": f"missing chunk {i}"}, 400
+                with open(part_path, "rb") as part:
+                    shutil.copyfileobj(part, out)
+
+        shutil.rmtree(folder, ignore_errors=True)
 
         size = os.path.getsize(out_path)
         file_obj = FastqFile(filename=filename, filepath=out_path, file_size=size, user_id=g.current_user.id)
         db.session.add(file_obj)
         db.session.commit()
 
-        return {"file_id": file_obj.id, "size": size}
+        return {"file_id": file_obj.id, "size": size, "filename": filename}
 
     @app.get("/api/files")
     @login_required
@@ -126,9 +136,11 @@ def create_app():
             "id": task.id,
             "status": task.status,
             "progress": task.progress,
+            "quality_mode": task.quality_mode,
             "result_path": task.result_path,
-            "report_path": task.message if task.message and task.message.endswith(".pdf") else None,
-            "message": task.message,
+            "report_path": task.report_path,
+            "error_message": task.error_message,
+            "file_id": task.file_id,
         }
 
     @app.get("/api/tasks")
@@ -145,27 +157,39 @@ def create_app():
                 "progress": t.progress,
                 "started_at": t.started_at.isoformat() if t.started_at else None,
                 "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+                "error_message": t.error_message,
             }
             for t in rows
         ])
+
+    @app.get("/api/tasks/<int:task_id>/download")
+    @login_required
+    def download_result(task_id: int):
+        task = Task.query.filter_by(id=task_id, user_id=g.current_user.id).first_or_404()
+        if not task.result_path or not os.path.exists(task.result_path):
+            return {"error": "compressed file not ready"}, 404
+        return send_file(task.result_path, as_attachment=True)
 
     @app.get("/api/reports/<int:task_id>")
     @login_required
     def download_report(task_id: int):
         task = Task.query.filter_by(id=task_id, user_id=g.current_user.id).first_or_404()
-        if not task.message or not os.path.exists(task.message):
+        if not task.report_path or not os.path.exists(task.report_path):
             return {"error": "report not ready"}, 404
-        return send_file(task.message, as_attachment=True)
+        return send_file(task.report_path, as_attachment=True)
 
-    @app.get("/api/analytics/<int:file_id>")
+    @app.get("/api/analytics/<int:task_id>")
     @login_required
-    def analytics(file_id: int):
-        file_obj = FastqFile.query.filter_by(id=file_id, user_id=g.current_user.id).first_or_404()
-        gzip_size = file_obj.compressed_size / max(0.95, 1.05) if file_obj.compressed_size else None
+    def analytics(task_id: int):
+        task = Task.query.filter_by(id=task_id, user_id=g.current_user.id).first_or_404()
+        if task.status != "finished":
+            return {"error": "task not finished"}, 400
+
+        source = task.source_file
         return {
             "bar": {
                 "labels": ["Original", "FastqCA", "Gzip"],
-                "values": [file_obj.file_size, file_obj.compressed_size or 0, int(gzip_size) if gzip_size else 0],
+                "values": [task.original_size or source.file_size, task.fastqca_size or 0, task.gzip_size or 0],
             },
             "quality": {
                 "x": [10, 20, 30, 40],

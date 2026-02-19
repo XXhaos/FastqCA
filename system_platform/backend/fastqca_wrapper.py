@@ -1,16 +1,21 @@
 import gzip
 import os
 import subprocess
+import sys
 from collections import Counter
+from pathlib import Path
 
 from Bio import SeqIO
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def run_fastqca(input_path: str, output_path: str, quality_mode: str, threads: int):
     compressor = "LossLess" if quality_mode == "lossless" else "Lossy"
     cmd = [
-        "python",
-        "main_new.py",
+        sys.executable,
+        str(REPO_ROOT / "main_new.py"),
         "--compressor",
         compressor,
         "--input_path",
@@ -22,7 +27,7 @@ def run_fastqca(input_path: str, output_path: str, quality_mode: str, threads: i
         "--threads",
         str(threads),
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, cwd=REPO_ROOT)
 
 
 def run_gzip(input_path: str, output_path: str):

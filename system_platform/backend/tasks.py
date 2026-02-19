@@ -8,7 +8,7 @@ from reportlab.pdfgen import canvas
 from config import Config
 from extensions import db
 from fastqca_wrapper import quality_distribution, run_fastqca, run_gzip, size_stats
-from models import FastqFile, Task
+from models import Task
 
 
 celery = Celery(__name__, broker=Config.CELERY_BROKER_URL, backend=Config.CELERY_RESULT_BACKEND)
@@ -52,7 +52,7 @@ def compress_task(self, task_id: int):
         report_path = os.path.join(Config.REPORT_DIR, f"task_{task.id}.pdf")
 
         try:
-            run_fastqca(input_path, Config.OUTPUT_DIR, task.quality_mode, task.threads)
+            run_fastqca(input_path, fastqca_output, task.quality_mode, task.threads)
             task.progress = 60
             db.session.commit()
 
@@ -69,13 +69,17 @@ def compress_task(self, task_id: int):
             source.status = "compressed"
 
             task.result_path = fastqca_output
-            task.message = report_path
+            task.report_path = report_path
+            task.original_size = stats["original"]
+            task.fastqca_size = stats["fastqca"]
+            task.gzip_size = stats["gzip"]
             task.progress = 100
             task.status = "finished"
             task.finished_at = datetime.utcnow()
+            task.error_message = None
         except Exception as exc:
             task.status = "failed"
-            task.message = str(exc)
+            task.error_message = str(exc)
             task.finished_at = datetime.utcnow()
 
         db.session.commit()

@@ -11,51 +11,224 @@
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
   <style>
     body { margin: 0; background: #f5f7fa; font-family: Arial, sans-serif; }
-    .wrap { padding: 16px; }
-    #chart { width: 100%; height: 320px; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
+    .row { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+    #chart { width: 100%; height: 340px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 8px 0 12px; }
   </style>
 </head>
 <body>
 <div id="app" class="wrap">
   <el-card>
-    <template #header><b>压缩任务管理</b></template>
-    <el-upload :auto-upload="false" drag>
-      <el-icon><upload-filled /></el-icon>
-      <div>将 FASTQ 拖拽到此处（演示页面，实际上传使用分片接口）</div>
-    </el-upload>
-    <el-table :data="tasks" style="margin-top: 16px">
-      <el-table-column prop="id" label="任务ID" width="80"/>
-      <el-table-column prop="status" label="状态"/>
-      <el-table-column prop="progress" label="进度">
-        <template #default="scope"><el-progress :percentage="scope.row.progress"/></template>
-      </el-table-column>
-    </el-table>
+    <template #header><b>FastqCA 系统登录</b></template>
+    <div class="toolbar">
+      <el-input v-model="auth.username" placeholder="用户名" style="max-width: 180px"></el-input>
+      <el-input v-model="auth.password" placeholder="密码" show-password style="max-width: 180px"></el-input>
+      <el-button @click="registerUser">注册</el-button>
+      <el-button type="primary" @click="loginUser">登录</el-button>
+      <el-tag v-if="token" type="success">已登录</el-tag>
+    </div>
   </el-card>
 
-  <el-card style="margin-top: 16px;">
-    <template #header><b>压缩效果分析</b></template>
-    <div id="chart"></div>
-  </el-card>
+  <div class="row" style="margin-top: 16px;">
+    <el-card>
+      <template #header><b>上传与压缩任务</b></template>
+      <div class="toolbar">
+        <input type="file" @change="pickFile" accept=".fastq,.fq,.txt" />
+      </div>
+      <div class="toolbar">
+        <el-select v-model="form.quality_mode" style="width: 130px">
+          <el-option label="无损" value="lossless"></el-option>
+          <el-option label="有损(Q4)" value="lossy"></el-option>
+        </el-select>
+        <el-input-number v-model="form.threads" :min="1" :max="64"></el-input-number>
+        <el-button type="primary" :disabled="!selectedFile || !token || uploading" @click="uploadAndCreateTask">
+          {{ uploading ? '上传中...' : '上传并开始压缩' }}
+        </el-button>
+      </div>
+
+      <el-table :data="tasks" style="margin-top: 10px">
+        <el-table-column prop="id" label="任务ID" width="80"></el-table-column>
+        <el-table-column prop="quality_mode" label="模式" width="110"></el-table-column>
+        <el-table-column prop="status" label="状态" width="110"></el-table-column>
+        <el-table-column prop="progress" label="进度">
+          <template #default="scope"><el-progress :percentage="scope.row.progress"></el-progress></template>
+        </el-table-column>
+        <el-table-column label="操作" width="240">
+          <template #default="scope">
+            <el-button size="small" @click="openAnalytics(scope.row.id)">查看分析</el-button>
+            <el-button size="small" @click="downloadResult(scope.row.id)">下载压缩包</el-button>
+            <el-button size="small" @click="downloadReport(scope.row.id)">下载报告</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <el-card>
+      <template #header><b>压缩效果分析</b></template>
+      <div id="chart"></div>
+    </el-card>
+  </div>
 </div>
 
 <script>
 const { createApp } = Vue;
+
 createApp({
   data() {
     return {
-      tasks: [{ id: 1, status: 'running', progress: 62 }, { id: 2, status: 'finished', progress: 100 }]
-    }
+      apiBase: 'http://127.0.0.1:5000',
+      token: localStorage.getItem('token') || '',
+      auth: { username: 'demo', password: '123456' },
+      form: { quality_mode: 'lossless', threads: 4 },
+      selectedFile: null,
+      uploading: false,
+      tasks: [],
+      timer: null,
+      chart: null,
+    };
   },
   mounted() {
-    const chart = echarts.init(document.getElementById('chart'));
-    chart.setOption({
-      tooltip: {},
-      legend: { data: ['大小(Byte)'] },
-      xAxis: { type: 'category', data: ['Original', 'FastqCA', 'Gzip'] },
-      yAxis: { type: 'value' },
-      series: [{ type: 'bar', data: [3000, 1100, 1250], name: '大小(Byte)' }]
-    });
-  }
+    this.chart = echarts.init(document.getElementById('chart'));
+    this.renderChart(['Original', 'FastqCA', 'Gzip'], [0, 0, 0]);
+    if (this.token) {
+      this.fetchTasks();
+      this.startPolling();
+    }
+  },
+  beforeUnmount() {
+    if (this.timer) clearInterval(this.timer);
+  },
+  methods: {
+    headers() {
+      return { Authorization: `Bearer ${this.token}` };
+    },
+    toast(msg, type = 'success') {
+      ElementPlus.ElMessage({ message: msg, type });
+    },
+    async registerUser() {
+      try {
+        await axios.post(`${this.apiBase}/api/auth/register`, this.auth);
+        this.toast('注册成功，请登录');
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '注册失败', 'error');
+      }
+    },
+    async loginUser() {
+      try {
+        const { data } = await axios.post(`${this.apiBase}/api/auth/login`, this.auth);
+        this.token = data.token;
+        localStorage.setItem('token', this.token);
+        this.toast('登录成功');
+        await this.fetchTasks();
+        this.startPolling();
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '登录失败', 'error');
+      }
+    },
+    pickFile(ev) {
+      this.selectedFile = ev.target.files?.[0] || null;
+    },
+    async uploadAndCreateTask() {
+      if (!this.selectedFile) return this.toast('请选择 FASTQ 文件', 'warning');
+      this.uploading = true;
+      const uploadId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const chunkSize = 4 * 1024 * 1024;
+      const totalChunks = Math.ceil(this.selectedFile.size / chunkSize);
+
+      try {
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * chunkSize;
+          const end = Math.min(this.selectedFile.size, start + chunkSize);
+          const form = new FormData();
+          form.append('upload_id', uploadId);
+          form.append('chunk_index', i);
+          form.append('chunk', this.selectedFile.slice(start, end));
+          await axios.post(`${this.apiBase}/api/files/chunk`, form, { headers: this.headers() });
+        }
+
+        const mergeResp = await axios.post(`${this.apiBase}/api/files/merge`, {
+          upload_id: uploadId,
+          filename: this.selectedFile.name,
+          total_chunks: totalChunks,
+        }, { headers: this.headers() });
+
+        const fileId = mergeResp.data.file_id;
+        const taskResp = await axios.post(`${this.apiBase}/api/tasks`, {
+          file_id: fileId,
+          quality_mode: this.form.quality_mode,
+          threads: this.form.threads,
+        }, { headers: this.headers() });
+
+        this.toast(`任务已创建: ${taskResp.data.task_id}`);
+        await this.fetchTasks();
+        this.startPolling();
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '上传/建任务失败', 'error');
+      } finally {
+        this.uploading = false;
+      }
+    },
+    async fetchTasks() {
+      if (!this.token) return;
+      const { data } = await axios.get(`${this.apiBase}/api/tasks`, { headers: this.headers() });
+      this.tasks = data;
+    },
+    startPolling() {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = setInterval(async () => {
+        try { await this.fetchTasks(); } catch (_) {}
+      }, 1500);
+    },
+    renderChart(labels, values) {
+      this.chart.setOption({
+        tooltip: {},
+        xAxis: { type: 'category', data: labels },
+        yAxis: { type: 'value' },
+        series: [{ type: 'bar', data: values, name: '大小(Byte)' }],
+      });
+    },
+    async openAnalytics(taskId) {
+      try {
+        const { data } = await axios.get(`${this.apiBase}/api/analytics/${taskId}`, { headers: this.headers() });
+        this.renderChart(data.bar.labels, data.bar.values);
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '分析数据暂不可用', 'warning');
+      }
+    },
+    async downloadResult(taskId) {
+      try {
+        const resp = await axios.get(`${this.apiBase}/api/tasks/${taskId}/download`, {
+          headers: this.headers(),
+          responseType: 'blob',
+        });
+        const url = URL.createObjectURL(resp.data);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `task_${taskId}.fqc`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '下载失败', 'error');
+      }
+    },
+    async downloadReport(taskId) {
+      try {
+        const resp = await axios.get(`${this.apiBase}/api/reports/${taskId}`, {
+          headers: this.headers(),
+          responseType: 'blob',
+        });
+        const url = URL.createObjectURL(resp.data);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `task_${taskId}_report.pdf`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        this.toast(e?.response?.data?.error || '下载失败', 'error');
+      }
+    },
+  },
 }).use(ElementPlus).mount('#app');
 </script>
 </body>
