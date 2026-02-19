@@ -64,7 +64,8 @@ with sync_playwright() as p:
     page.wait_for_timeout(1200)
 
     for text, filename in shots:
-        page.get_by_text(text, exact=True).click()
+        menu_item = page.get_by_role("menuitem", name=text).first
+        menu_item.click()
         page.wait_for_timeout(800)
         page.screenshot(path=os.path.join(out_dir, filename), full_page=True)
 
