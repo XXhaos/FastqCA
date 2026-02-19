@@ -35,19 +35,30 @@
   </aside>
 
   <main class="main">
-    <el-card>
+    <el-card v-if="!token">
       <template #header><b>系统登录</b></template>
       <div class="toolbar">
-        <el-input v-model="auth.username" placeholder="用户名" style="max-width: 180px"></el-input>
-        <el-input v-model="auth.password" placeholder="密码" show-password style="max-width: 180px"></el-input>
+        <el-input v-model="auth.username" placeholder="用户名" style="max-width: 220px"></el-input>
+        <el-input v-model="auth.password" placeholder="密码" show-password style="max-width: 220px"></el-input>
         <el-button @click="registerUser">注册</el-button>
         <el-button type="primary" @click="loginUser">登录</el-button>
-        <el-tag v-if="token" type="success">{{ me.username }} ({{ me.role }})</el-tag>
-        <el-button v-if="token" @click="logout">退出</el-button>
       </div>
     </el-card>
 
-    <section v-show="activePage === 'tasks'" class="panel">
+    <el-card v-else>
+      <div class="toolbar" style="justify-content: space-between; width: 100%;">
+        <div>
+          <b>{{ me.username }}</b>，欢迎使用 FastqCA
+          <el-tag size="small" style="margin-left: 8px" type="success">{{ me.role }}</el-tag>
+        </div>
+        <el-button @click="logout">退出登录</el-button>
+      </div>
+    </el-card>
+
+
+    <el-empty v-if="!token" description="请先登录以进入系统模块" style="margin-top: 24px;"></el-empty>
+
+    <section v-show="token && activePage === 'tasks'" class="panel">
       <el-card>
         <template #header><b>压缩任务</b></template>
         <div class="toolbar">
@@ -99,7 +110,7 @@
       </el-card>
     </section>
 
-    <section v-show="activePage === 'history'" class="panel">
+    <section v-show="token && activePage === 'history'" class="panel">
       <el-card>
         <template #header><b>压缩历史</b></template>
         <el-button @click="fetchHistory">刷新历史</el-button>
@@ -117,7 +128,7 @@
       </el-card>
     </section>
 
-    <section v-show="activePage === 'performance'" class="panel">
+    <section v-show="token && activePage === 'performance'" class="panel">
       <el-card>
         <template #header><b>性能监测</b></template>
         <div class="toolbar"><el-button @click="refreshPerformance">刷新性能数据</el-button></div>
@@ -137,7 +148,7 @@
       </el-card>
     </section>
 
-    <section v-show="activePage === 'users'" class="panel">
+    <section v-show="token && activePage === 'users'" class="panel">
       <el-card>
         <template #header><b>用户管理</b></template>
         <el-button :disabled="me.role !== 'admin'" @click="fetchUsers">刷新用户</el-button>
@@ -340,7 +351,10 @@ createApp({
         this.toast('登录成功');
         await this.afterLogin();
       } catch (_) {
-        this.toast('后端不可用，当前展示真实测试集演示数据', 'warning');
+        this.token = 'demo-offline-token';
+        localStorage.setItem('token', this.token);
+        this.me = { username: this.auth.username || 'demo_user', role: this.auth.username.includes('admin') ? 'admin' : 'researcher' };
+        this.toast('后端不可用，已进入离线演示模式', 'warning');
       }
     },
     async afterLogin() {
