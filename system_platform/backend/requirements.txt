@@ -1,0 +1,8 @@
+flask
+flask-sqlalchemy
+celery
+redis
+biopython
+reportlab
+werkzeug
+itsdangerous

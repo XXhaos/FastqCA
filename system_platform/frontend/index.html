@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FastqCA 压缩管理平台</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+  <script src="https://unpkg.com/element-plus"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    body { margin: 0; background: #f5f7fa; font-family: Arial, sans-serif; }
+    .wrap { padding: 16px; }
+    #chart { width: 100%; height: 320px; }
+  </style>
+</head>
+<body>
+<div id="app" class="wrap">
+  <el-card>
+    <template #header><b>压缩任务管理</b></template>
+    <el-upload :auto-upload="false" drag>
+      <el-icon><upload-filled /></el-icon>
+      <div>将 FASTQ 拖拽到此处（演示页面，实际上传使用分片接口）</div>
+    </el-upload>
+    <el-table :data="tasks" style="margin-top: 16px">
+      <el-table-column prop="id" label="任务ID" width="80"/>
+      <el-table-column prop="status" label="状态"/>
+      <el-table-column prop="progress" label="进度">
+        <template #default="scope"><el-progress :percentage="scope.row.progress"/></template>
+      </el-table-column>
+    </el-table>
+  </el-card>
+
+  <el-card style="margin-top: 16px;">
+    <template #header><b>压缩效果分析</b></template>
+    <div id="chart"></div>
+  </el-card>
+</div>
+
+<script>
+const { createApp } = Vue;
+createApp({
+  data() {
+    return {
+      tasks: [{ id: 1, status: 'running', progress: 62 }, { id: 2, status: 'finished', progress: 100 }]
+    }
+  },
+  mounted() {
+    const chart = echarts.init(document.getElementById('chart'));
+    chart.setOption({
+      tooltip: {},
+      legend: { data: ['大小(Byte)'] },
+      xAxis: { type: 'category', data: ['Original', 'FastqCA', 'Gzip'] },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', data: [3000, 1100, 1250], name: '大小(Byte)' }]
+    });
+  }
+}).use(ElementPlus).mount('#app');
+</script>
+</body>
+</html>
