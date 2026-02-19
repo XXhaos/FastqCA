@@ -37,20 +37,14 @@ celery -A tasks.celery worker --loglevel=info
 cd /workspace/FastqCA/system_platform/frontend
 python3 -m http.server 4173
 ```
-
 浏览器打开：`http://127.0.0.1:4173`
 
-## 5. 页面演示流程
-1. 在页面顶部输入用户名密码，先“注册”再“登录”。
-2. 选择 FASTQ 文件。
-3. 选择压缩模式（无损/有损）与线程数。
-4. 点击“上传并开始压缩”。
-5. 观察任务进度条自动更新。
-6. 任务完成后点击：
-   - “查看分析”：加载 Original/FastqCA/Gzip 柱状图；
-   - “下载压缩包”；
-   - “下载报告”。
+## 5. 模块演示建议
+1. **压缩任务**：上传 FASTQ，选无损/有损模式，启动任务并观察进度。
+2. **压缩历史**：展示压缩率、压缩耗时、吞吐率历史记录。
+3. **性能监测**：展示 CPU/内存曲线和任务成功率等指标。
+4. **用户管理**（admin）：查看用户列表并修改角色。
 
 ## 6. 注意事项
-- 如果你之前运行过旧版本并且数据库结构冲突，删除 `system_platform/backend/instance/fastqca_platform.db` 后重启后端。
-- FastqCA 实际压缩由 `main_new.py` 调用，需确保仓库根目录已有 `lpaq8` 可执行文件并可运行。
+- 若数据库是旧版本结构，删除 `system_platform/backend/instance/fastqca_platform.db` 后重启。
+- FastqCA 压缩调用 `main_new.py`，请确保仓库根目录 `lpaq8` 可执行。

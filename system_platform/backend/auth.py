@@ -38,3 +38,14 @@ def login_required(fn):
         return fn(*args, **kwargs)
 
     return wrapper
+
+
+def admin_required(fn):
+    @wraps(fn)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if g.current_user.role != "admin":
+            return {"error": "admin only"}, 403
+        return fn(*args, **kwargs)
+
+    return wrapper

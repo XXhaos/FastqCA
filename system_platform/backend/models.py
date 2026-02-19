@@ -54,7 +54,8 @@ class Task(db.Model):
     error_message = db.Column(db.String(512))
     original_size = db.Column(db.BigInteger)
     fastqca_size = db.Column(db.BigInteger)
-    gzip_size = db.Column(db.BigInteger)
+    compression_time_sec = db.Column(db.Float)
+    throughput_mb_s = db.Column(db.Float)
     started_at = db.Column(db.DateTime)
     finished_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -63,3 +64,14 @@ class Task(db.Model):
     file_id = db.Column(db.Integer, db.ForeignKey("files.id"), nullable=False)
 
     source_file = db.relationship("FastqFile", backref="tasks", lazy=True)
+
+
+class PerformanceMetric(db.Model):
+    __tablename__ = "performance_metrics"
+
+    id = db.Column(db.Integer, primary_key=True)
+    cpu_percent = db.Column(db.Float, nullable=False)
+    memory_percent = db.Column(db.Float, nullable=False)
+    active_tasks = db.Column(db.Integer, nullable=False)
+    queued_tasks = db.Column(db.Integer, nullable=False)
+    recorded_at = db.Column(db.DateTime, default=datetime.utcnow)
