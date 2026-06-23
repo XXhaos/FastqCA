@@ -1,3 +1,5 @@
+"""Python wrappers around the external LPAQ8 executable used by FastqCA."""
+
 import os
 import subprocess
 import threading
@@ -5,14 +7,10 @@ import time
 
 
 def compress_lpaq8(lpaq8_path, input_path, output_path, compression_level='9'):
-    """
-    使用lpaq8压缩单个文件。
+    """Start LPAQ8 compression for one input stream.
 
-    参数:
-    - lpaq8_path: lpaq8的路径。
-    - compression_level: 压缩级别。
-    - input_path: 输入文件路径。
-    - output_path: 输出文件路径。
+    The default compression level is 9, matching the high-density setting used
+    by FastqCA in the benchmark workflow.
     """
     command = [lpaq8_path, compression_level, input_path, output_path]
     try:
@@ -25,15 +23,7 @@ def compress_lpaq8(lpaq8_path, input_path, output_path, compression_level='9'):
         print(f"发生未知错误: {str(e)}")
 
 def compress_lpaq8_test(lpaq8_path, input_stream, output_path, compression_level='9'):
-    """
-    使用lpaq8压缩单个文件。
-
-    参数:
-    - lpaq8_path: lpaq8的路径。
-    - compression_level: 压缩级别。
-    - input_path: 输入文件路径。
-    - output_path: 输出文件路径。
-    """
+    """Run LPAQ8 compression synchronously for a single input stream."""
     command = [lpaq8_path, compression_level, input_stream, output_path]
     try:
         subprocess.run(command, check=True)
@@ -45,15 +35,7 @@ def compress_lpaq8_test(lpaq8_path, input_stream, output_path, compression_level
 
 
 def decompress_lpaq8(lpaq8_path, input_path, output_path):
-    """
-    使用lpaq8压缩单个文件。
-
-    参数:
-    - lpaq8_path: lpaq8的路径。
-    - compression_level: 压缩级别。
-    - input_path: 输入文件路径。
-    - output_path: 输出文件路径。
-    """
+    """Start LPAQ8 decompression for one compressed stream."""
     command = [lpaq8_path, 'd', input_path, output_path]
     try:
         process = subprocess.Popen(command)
@@ -66,45 +48,22 @@ def decompress_lpaq8(lpaq8_path, input_path, output_path):
 
 
 def compress_file(input_file, output_file, lpaq8_path, compression_level='9'):
-    """
-    压缩指定的文件。
-
-    参数:
-    - input_file: 完整的输入文件路径。
-    - output_file: 压缩文件的输出目录。
-    - lpaq8_path: lpaq8压缩器的完整路径。
-    - compression_level: 压缩级别（默认为9，范围0-9）。
-    """
-    # 调用lpaq8进行压缩
+    """Compress one file with the configured LPAQ8 executable."""
+    # Delegate the actual entropy coding to the external LPAQ8 executable.
     return compress_lpaq8(lpaq8_path, input_file, output_file, compression_level)
 
 
 def decompress_file(input_file, output_file, lpaq8_path):
-    """
-    压缩指定的文件。
-
-    参数:
-    - input_file: 完整的输入文件路径。
-    - output_directory: 压缩文件的输出目录。
-    - lpaq8_path: lpaq8压缩器的完整路径。
-    """
+    """Decompress one LPAQ8-compressed stream."""
     return decompress_lpaq8(lpaq8_path, input_file, output_file)
 
 
 def compress_all_files_in_directory(input_directory, output_directory, lpaq8_path, compression_level='9'):
-    """
-    压缩目录中的所有文件。
-
-    参数:
-    - input_directory: 输入目录路径。
-    - output_directory: 输出目录路径。
-    - lpaq8_path: lpaq8压缩器的完整路径。
-    - compression_level: 压缩级别（默认为9，范围0-9）。
-    """
-    # 记录开始时间
+    """Compress all files in a directory with LPAQ8."""
+    # Record elapsed time for console reporting only.
     start_time = time.time()
 
-    # 确保输出目录存在
+    # Ensure the destination directory exists before launching LPAQ8 jobs.
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
 
@@ -116,26 +75,18 @@ def compress_all_files_in_directory(input_directory, output_directory, lpaq8_pat
 
             compress_file(input_file_path, output_path, lpaq8_path, compression_level)
 
-    # 记录结束时间
+    # Report total wall-clock time for this batch helper.
     end_time = time.time()
 
     print(f"所有文件已压缩完成。总共耗时: {(end_time - start_time) / 60} 分钟。")
 
 
 def decompress_all_files_in_directory(input_directory, output_directory, lpaq8_path):
-    """
-    解压目录中的所有文件。
-
-    参数:
-    - input_directory: 输入目录路径。
-    - output_directory: 输出目录路径。
-    - lpaq8_path: lpaq8压缩器的完整路径。
-    - compression_level: 压缩级别（默认为9，范围0-9）。
-    """
-    # 记录开始时间
+    """Decompress all recognized LPAQ8 stream files in a directory."""
+    # Record elapsed time for console reporting only.
     start_time = time.time()
 
-    # 确保输出目录存在
+    # Ensure the destination directory exists before writing restored streams.
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
 
@@ -162,13 +113,14 @@ def decompress_all_files_in_directory(input_directory, output_directory, lpaq8_p
             if error:
                 print(f"未知文件类型: {file}")
 
-    # 记录结束时间
+    # Report total wall-clock time for this batch helper.
     end_time = time.time()
 
     print(f"所有文件已解压完成。总共耗时: {(end_time - start_time) / 60} 分钟。")
 
 
 def get_file_size(file_path):
+    """Return a human-readable 1024-based file-size string."""
     file_size = os.path.getsize(file_path)
 
     if file_size < 1024:
@@ -182,6 +134,7 @@ def get_file_size(file_path):
 
 
 def get_directory_size(directory_path):
+    """Return a recursive human-readable directory-size string."""
     total_size = 0
     for dirpath, dirnames, filenames in os.walk(directory_path):
         for f in filenames:
@@ -198,6 +151,7 @@ def get_directory_size(directory_path):
         return f"{total_size / (1024 * 1024 * 1024):.2f} GB"
 
 def monitor_output_file(output_file):
+    """Print the size of an output file periodically for manual monitoring."""
     while True:
         file_size = os.path.getsize(output_file)
         print(f"Output file size: {file_size} bytes")

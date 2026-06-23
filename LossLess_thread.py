@@ -1,3 +1,9 @@
+"""Lossless FastqCA compression and decompression pipeline.
+
+The lossless mode applies CA-based residual prediction to nucleotide matrices
+while preserving original quality-score values for direct LPAQ8 compression.
+"""
+
 import argparse
 import os
 import shutil
@@ -6,7 +12,7 @@ import time
 import re
 import gc
 import mmap
-import struct  # 【新增】用于打包二进制长度数据
+import struct  # Packs explicit binary payload lengths for archive streams.
 from tqdm import tqdm
 from PIL import Image, UnidentifiedImageError
 from Bio.Seq import Seq
@@ -17,27 +23,31 @@ from itertools import product, chain
 from Bio import SeqIO
 import multiprocessing
 
-# 确保目录下有 lpaq8.py
+# LPAQ8 wrapper used by the per-stream entropy coding stage.
 from lpaq8 import compress_file, decompress_file
 
 Image.MAX_IMAGE_PIXELS = None
 
 base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
 gray_to_base = {32: 'A', 64: 'T', 192: 'G', 224: 'C', 0: 'N'}
+# Lookup table for vectorized nucleotide-to-byte mapping.
 base_gray_lut = np.zeros(256, dtype=np.uint8)
 for base, value in base_to_gray.items():
     base_gray_lut[ord(base)] = value
 
 
 def find_delimiters(identifier):
+    """Extract delimiter characters from a FASTQ identifier."""
     return re.findall(r'[.:_\s=/-]', identifier)
 
 
 def split_identifier(identifier, delimiters):
+    """Split an identifier into token values using supported delimiters."""
     return re.split(r'[.:_\s=/-]', identifier)
 
 
 def generate_regex(delimiters):
+    """Build an identifier template that can be paired with token values."""
     regex = ""
     count = 1
     for delimiter in delimiters:
@@ -49,6 +59,7 @@ def generate_regex(delimiters):
 
 
 def init_rules_dict():
+    """Initialize the adaptive CA rule table for nucleotide byte values."""
     values = [0, 32, 64, 192, 224]
     combinations = list(product(values, repeat=4))
     rules_dict = defaultdict(int)
@@ -58,6 +69,7 @@ def init_rules_dict():
 
 
 def get_reads_num_per_block(fastq_path, block_size):
+    """Estimate reads per chunk from read length and requested block size."""
     with open(fastq_path, 'r') as file:
         try:
             first_record = next(SeqIO.parse(file, "fastq"))
@@ -74,6 +86,12 @@ def get_reads_num_per_block(fastq_path, block_size):
 # --- Compression Logic ---
 
 def generate_g_prime(G, rules_dict):
+    """Generate a lossless nucleotide CA residual matrix.
+
+    A correctly predicted nucleotide is stored as marker value 1; otherwise the
+    original mapped nucleotide value is retained. Quality scores are not
+    quantized in the lossless pipeline.
+    """
     G_prime = np.zeros_like(G)
     rows, cols = G.shape
     for i in range(rows):
@@ -85,12 +103,14 @@ def generate_g_prime(G, rules_dict):
             matched_rule = (up, left_up, left, center)
             candidates = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
             top_rule = max(candidates, key=lambda r: rules_dict[r])
+            # Marker 1 denotes a CA prediction hit and any other value is a residual symbol.
             G_prime[i, j] = 1 if top_rule[3] == center else center
             rules_dict[matched_rule] += 1
     return G_prime
 
 
 def process_records(records_iter, record_count, read_length, rules_dict):
+    """Convert FASTQ records into ID, nucleotide residual and quality streams."""
     id_block = []
     base_block = np.empty((record_count, read_length), dtype=np.uint8)
     quality_block = np.empty((record_count, read_length), dtype=np.uint8)
@@ -101,6 +121,7 @@ def process_records(records_iter, record_count, read_length, rules_dict):
         delimiters = find_delimiters(id_str)
         tokens = split_identifier(id_str, delimiters)
         regex = generate_regex(delimiters)
+        # Identifier tokens and delimiter templates are compressed separately.
         id_block.append((tokens, regex))
 
         seq_bytes = bytes(record.seq)
@@ -109,6 +130,7 @@ def process_records(records_iter, record_count, read_length, rules_dict):
         base_block[row, :min(base_row.size, read_length)] = base_row[:read_length]
 
         qualities = record.letter_annotations["phred_quality"]
+        # Lossless mode stores original quality values; no Q4 quantization is applied.
         quality_row = np.fromiter((q * 2 for q in qualities), dtype=np.uint8)
         quality_block[row].fill(0)
         quality_block[row, :min(quality_row.size, read_length)] = quality_row[:read_length]
@@ -124,6 +146,7 @@ def process_records(records_iter, record_count, read_length, rules_dict):
 
 
 def save_intermediate_files(g_block, quality_block, id_block, output_path, block_count):
+    """Optionally save front-end streams for inspection and debugging."""
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
     g_block.save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
@@ -136,22 +159,23 @@ def save_intermediate_files(g_block, quality_block, id_block, output_path, block
 
 
 def compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path):
+    """Run LPAQ8 on one temporary stream and wait for completion."""
     process = compress_file(temp_input_path, temp_output_path, lpaq8_path)
     if process: process.wait()
 
 
 def write_safe_chunk(output_file, tag, data):
-    """【核心修复】写入Tag + 8字节长度 + 数据，防止分隔符冲突"""
-    # 写入 tag (如 %quality%)
+    """Write one archive stream as tag + 8-byte length + payload."""
+    # Write the stream tag, for example b"%quality%".
     output_file.write(tag)
-    # 写入 8字节 无符号整数表示长度 (Little Endian)
-    # 这确保解压时知道精确读取多少字节，而不需要搜索下一个 tag
+    # Store an explicit little-endian payload length to avoid delimiter searches.
     output_file.write(struct.pack('<Q', len(data)))
-    # 写入数据
+    # Write the compressed payload bytes exactly as produced by LPAQ8.
     output_file.write(data)
 
 
 def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_path, save, block_count):
+    """Compress the four lossless streams for one chunk into a part file."""
     part_output_path = os.path.join(os.path.dirname(output_path), f"chunk_{block_count}.part")
     temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_proc_{block_count}")
     temp_input_path, temp_output_path = f"{temp_prefix}_input", f"{temp_prefix}_output"
@@ -211,6 +235,7 @@ def back_compress_worker(g_block, quality_block, id_block, lpaq8_path, output_pa
 
 
 def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq8_path, save, record_count):
+    """Parse, transform and compress one temporary FASTQ chunk."""
     try:
         gc.collect()
         with open(temp_chunk_path, 'r') as f:
@@ -223,7 +248,7 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
             read_length = len(first_record.seq)
             rules_dict = init_rules_dict()
 
-            # 预分配数组并逐行填充，避免 list -> numpy 的中间副本
+            # Preallocate arrays and fill them row by row to avoid list-to-numpy copies.
             g_block, quality_block, id_block = process_records(
                 chain([first_record], parser), record_count, read_length, rules_dict
             )
@@ -246,6 +271,7 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
 
 
 def merge_parts(output_path, total_blocks):
+    """Merge chunk part files in order and append the archive EOF marker."""
     missing_parts = []
     tqdm.write(f"info：正在合并 {total_blocks} 个数据块...")
     with open(output_path, "wb") as final_file:
@@ -264,6 +290,7 @@ def merge_parts(output_path, total_blocks):
 
 
 def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, max_workers):
+    """Compress a FASTQ file by dispatching independent chunks to workers."""
     output_path = get_output_path(fastq_path, output_path)
     out_dir = os.path.dirname(output_path)
     if out_dir and not os.path.exists(out_dir): os.makedirs(out_dir)
@@ -277,7 +304,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
 
     read_count_per_block, block_count = 0, 1
 
-    # 保持 maxtasksperchild=1 防止内存泄漏
+    # maxtasksperchild=1 lets worker memory be reclaimed after each chunk.
     with multiprocessing.Pool(processes=max_workers, maxtasksperchild=1) as pool:
         results = []
         errors = []
@@ -287,6 +314,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
         temp_handle = open(temp_chunk_path, 'w')
 
         def dispatch_current_chunk(path, count, record_total):
+            """Send the current chunk file to a worker process."""
             temp_handle.close()
             res = pool.apply_async(
                 process_block_task_from_file,
@@ -341,6 +369,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
 # --- Decompression Logic ---
 
 def monitor(process, temp_input_path, temp_output_path):
+    """Wait until an LPAQ8 subprocess has produced its output file."""
     while True:
         if os.path.exists(temp_input_path) and os.path.exists(temp_output_path):
             if process.poll() is not None: break
@@ -348,13 +377,15 @@ def monitor(process, temp_input_path, temp_output_path):
 
 
 def decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path):
+    """Run LPAQ8 decompression for one temporary stream."""
     process = decompress_file(temp_input_path, temp_output_path, lpaq8_path)
-    # 直接等待子进程结束，避免 monitor 轮询带来的额外阻塞
+    # Wait directly for the subprocess and avoid extra polling overhead.
     process.wait()
 
 
 def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_path, g_prime_path, quality_path, save,
                              block_count):
+    """Decompress the four streams belonging to one lossless archive chunk."""
     back_compress_dir = os.path.join(os.path.dirname(output_path), "back_compressed")
     front_compress_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     if save:
@@ -411,7 +442,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_p
     finally:
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
         if os.path.exists(temp_output_path): os.remove(temp_output_path)
-        # 清理分块缓存文件，避免磁盘和内存堆积
+        # Remove per-chunk cached stream files to avoid disk and memory buildup.
         for chunk_path in (id_regex_path, id_tokens_path, g_prime_path, quality_path):
             try:
                 if os.path.exists(chunk_path):
@@ -421,7 +452,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_p
 
         if id_block is not None and g_prime is not None and quality is not None:
             reconstruct_fastq(output_path, id_block, g_prime, quality, is_first_block=True, custom_path=temp_fastq_path)
-        # 及时释放块内大对象，避免在主进程堆积
+        # Release large chunk-local objects as soon as reconstruction finishes.
         id_regex = id_tokens = id_block = g_prime = quality = None
         gc.collect()
 
@@ -429,6 +460,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_path, id_tokens_p
 
 
 def reconstruct_id(tokens, regex):
+    """Rebuild FASTQ identifiers from token streams and templates."""
     reconstructed_ids = []
     for t, r in zip(tokens, regex):
         id_str = r
@@ -440,6 +472,7 @@ def reconstruct_id(tokens, regex):
 
 
 def reconstruct_g_from_g_prime(g_prime_array, rules_dict):
+    """Invert nucleotide CA residuals using the same online rule update order."""
     De_g = np.zeros_like(g_prime_array)
     rows, cols = g_prime_array.shape
     for i in range(rows):
@@ -450,6 +483,7 @@ def reconstruct_g_from_g_prime(g_prime_array, rules_dict):
             left_up = De_g[i - 1, j - 1] if i != 0 and j != 0 else 0
             candidates = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
             top_rule = max(candidates, key=lambda r: rules_dict[r])
+            # Marker 1 is replaced by the current CA prediction during restore.
             De_g[i, j] = top_rule[3] if g_prime_array[i, j] == 1 else center
             matched_rule = (up, left_up, left, De_g[i, j])
             rules_dict[matched_rule] += 1
@@ -457,6 +491,7 @@ def reconstruct_g_from_g_prime(g_prime_array, rules_dict):
 
 
 def reconstruct_base_and_quality(g_prime_img, quality_img):
+    """Restore nucleotide strings and original quality scores."""
     bases, qualities = [], []
     rules_dict = defaultdict(int)
     g_prime_array = np.array(g_prime_img)
@@ -471,12 +506,12 @@ def reconstruct_base_and_quality(g_prime_img, quality_img):
 
 
 def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False, custom_path=None):
-    """流式写入 FASTQ，避免构造大列表/SeqRecord 造成内存峰值。"""
+    """Stream one reconstructed chunk to FASTQ to limit peak memory use."""
     target_fastq_path = custom_path if custom_path else (
         output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
     )
 
-    # 预计算 LUT，减少循环开销
+    # Precompute a lookup table to reduce per-base conversion overhead.
     gray_to_char = {v: k for k, v in base_to_gray.items()}
     base_lut = np.frombuffer(
         bytes([ord(gray_to_char.get(i, 'N')) for i in range(256)]),
@@ -492,7 +527,7 @@ def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_
     quality_array = np.array(quality_img, dtype=np.uint8)
     rows, cols = g_prime_array.shape
 
-    # 行递归重建，保持常数行缓冲，避免整块字符串常驻
+    # Reconstruct one row at a time so full-block strings do not stay resident.
     rules_dict = defaultdict(int)
     prev_row = np.zeros(cols, dtype=np.uint8)
     mode = 'w' if custom_path or is_first_block else 'a'
@@ -518,14 +553,14 @@ def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_
             output_handle.write(f"@{ids[i]}\n{seq_str}\n+\n{qual_str}\n")
             prev_row = de_row
 
-    # 显式释放大数组
+    # Explicitly release large arrays before the worker returns.
     del g_prime_array, quality_array, prev_row, base_lut, ids
     gc.collect()
     return target_fastq_path
 
 
 def read_chunk_safe(mmap_obj, tag):
-    """严格按当前位置读取 tag + 长度 + 数据，避免搜索误匹配导致偏移"""
+    """Read one tagged payload from the archive at the current mmap offset."""
     start_pos = mmap_obj.tell()
     header = mmap_obj.read(len(tag))
     if header != tag:
@@ -544,8 +579,9 @@ def read_chunk_safe(mmap_obj, tag):
 
 
 def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_workers):
+    """Decompress a lossless FastqCA archive while preserving chunk order."""
     output_path = get_output_path(compressed_path, output_path)
-    # 标记符定义
+    # Stream tags used by the tag + length + payload archive layout.
     id_regex_tag = b"%id_regex%"
     id_tokens_tag = b"%id_tokens%"
     base_tag = b"%base_g_prime%"
@@ -559,8 +595,8 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
         with mmap.mmap(input_file.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             tqdm.write(f"info：开始解压 (安全长度模式 | 并行={max_workers})...")
-            # 使用进程池保证每个块在独立进程中处理，内存可在子进程退出时被OS回收；参数传递仅用磁盘路径避免巨型对象序列化
-            # 大块（700MB+）解压会瞬时产生 GB 级中间对象，硬限制并发为最多 2，防止主机内存暴涨
+            # Process chunks in worker processes so memory can be reclaimed when workers exit.
+            # Lossless decompression caps active workers to reduce peak memory pressure.
             pool_workers = max(1, min(max_workers, 2))
             with multiprocessing.Pool(processes=pool_workers, maxtasksperchild=1) as pool:
                 pending = {}
@@ -571,6 +607,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
                 def flush_ready_results():
                     nonlocal next_to_write
+                    # Workers may finish out of order; append FASTQ chunks in archive order.
                     while next_to_write in pending and pending[next_to_write].ready():
                         try:
                             temp_fastq_path = pending[next_to_write].get()
@@ -598,7 +635,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                     g_prime_data = read_chunk_safe(mm, base_tag)
                     quality_data = read_chunk_safe(mm, quality_tag)
 
-                    # 将大块数据落盘，仅传递路径给子进程，避免 pickling 大对象
+                    # Dump large payloads to disk and pass paths to avoid pickling large objects.
                     def dump_chunk(tag, data):
                         path = os.path.join(chunk_dir, f"chunk_{block_count}_{tag}.bin")
                         with open(path, "wb") as fh:
@@ -622,13 +659,12 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                     if len(pending) > max_workers * 3:
                         time.sleep(0.1)
                     flush_ready_results()
-                    # 防止主进程一次性将所有分块排队，导致输入队列累积大块二进制数据占用内存。
-                    # 将排队上限收紧到“等于并行度”，避免 4 线程下出现 8~12 个大块同时驻留内存。
+                    # Limit queued chunks so large binary payloads do not accumulate in memory.
                     while len(pending) >= max_workers:
                         flush_ready_results()
                         if len(pending) >= max_workers:
                             time.sleep(0.05)
-                    # 主进程不再持有块数据，立刻触发GC降低占用
+                    # Drop chunk payload references in the parent process promptly.
                     del id_regex_data, id_tokens_data, g_prime_data, quality_data
                     gc.collect()
 
@@ -655,6 +691,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
 
 def get_output_path(input_path, output_path):
+    """Resolve an output file path from a file or output directory argument."""
     if input_path is None or not os.path.isfile(input_path): exit(1)
     if os.path.isdir(output_path):
         basename = os.path.splitext(os.path.basename(input_path))[0]
@@ -663,6 +700,7 @@ def get_output_path(input_path, output_path):
 
 
 def delete_temp_files(output_path):
+    """Remove temporary files and optional intermediate stream directories."""
     temp_dir = os.path.dirname(output_path)
     for f in os.listdir(temp_dir):
         if f.startswith("temp_proc_") or f.startswith("temp_input") or f.startswith("temp_output") or f.startswith(
@@ -681,6 +719,7 @@ def delete_temp_files(output_path):
 
 
 def main():
+    """Standalone CLI for the lossless FastqCA pipeline."""
     lpaq8_path = f"{os.getcwd()}/lpaq8"
     parser = argparse.ArgumentParser(description='fastq compress optimized')
     parser.add_argument('--input_path', type=str, required=True, help='input_path')

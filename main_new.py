@@ -1,3 +1,10 @@
+"""Command-line entry point for FastqCA.
+
+This module dispatches compression and decompression requests to the lossy or
+lossless pipeline and manages the read-count manifest used to validate lossy
+decompression output.
+"""
+
 import argparse
 import os
 from typing import Optional
@@ -22,10 +29,12 @@ LOSSLESS_COMMANDS = ["LossLess", "lossless", "lossLess", "Lossless"]
 
 
 def count_reads(fastq_path: str) -> int:
+    """Count FASTQ records for manifest validation."""
     return sum(1 for _ in SeqIO.parse(fastq_path, "fastq"))
 
 
 def read_manifest(manifest_path: str) -> Optional[int]:
+    """Read an optional read-count manifest written during lossy compression."""
     if not os.path.exists(manifest_path):
         return None
     with open(manifest_path, "r") as handle:
@@ -37,11 +46,13 @@ def read_manifest(manifest_path: str) -> Optional[int]:
 
 
 def write_manifest(manifest_path: str, read_count: int) -> None:
+    """Write the expected read count for later lossy decompression checks."""
     with open(manifest_path, "w") as handle:
         handle.write(str(read_count))
 
 
 def main() -> None:
+    """Parse CLI arguments and dispatch to the selected FastqCA pipeline."""
     lpaq8_path = f"{os.getcwd()}/lpaq8"
 
     parser = argparse.ArgumentParser(description="fastq compress (multithread version)")
@@ -65,6 +76,8 @@ def main() -> None:
     if args.compressor in LOSSY_COMMANDS:
         archive_path = lossy_output_path(args.input_path, args.output_path)
         if args.mode in ["compress", "c"]:
+            # The lossy mode may alter quality values, so a manifest is kept to
+            # verify that decompression preserves the number of FASTQ records.
             manifest_path = args.manifest or f"{archive_path}.readcount"
             read_count = count_reads(args.input_path)
             lossy_compress(
@@ -94,6 +107,7 @@ def main() -> None:
             )
             restored_reads = count_reads(restored_path)
             expected_reads = read_manifest(manifest_path)
+            # A missing manifest is tolerated, but a present manifest must match.
             if expected_reads is not None and restored_reads != expected_reads:
                 raise RuntimeError(
                     f"解压后的 read 数量 ({restored_reads}) 与清单记录的数量 ({expected_reads}) 不一致"

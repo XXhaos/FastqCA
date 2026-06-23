@@ -1,7 +1,10 @@
+"""Small utility helpers shared by FastqCA scripts."""
+
 import os
 
 
 def check_output_path(output_path):
+    """Return whether an output path is available for FastqCA output."""
     if not os.path.exists(output_path):
         os.mkdir(output_path)
         return True
@@ -12,6 +15,11 @@ def check_output_path(output_path):
 
 
 def get_file_size(file_path):
+    """Return a human-readable file-size string for console reporting.
+
+    This helper uses 1024-based scaling for display only and does not affect the
+    byte-based benchmark measurements reported in the manuscript.
+    """
     file_size = os.path.getsize(file_path)
 
     if file_size < 1024:
@@ -25,6 +33,7 @@ def get_file_size(file_path):
 
 
 def get_directory_size(directory_path):
+    """Return the recursive directory size as a human-readable string."""
     total_size = 0
     for dirpath, dirnames, filenames in os.walk(directory_path):
         for f in filenames:
@@ -42,6 +51,7 @@ def get_directory_size(directory_path):
 
 
 def show_time(elapsed_time, des):
+    """Print elapsed wall-clock time using a compact human-readable unit."""
     hours, remainder = divmod(elapsed_time, 3600)
     minutes, seconds = divmod(remainder, 60)
 

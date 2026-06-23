@@ -1,3 +1,10 @@
+"""Lossy FastqCA compression and decompression pipeline.
+
+The lossy mode maps nucleotide symbols to byte values, quantizes Phred quality
+scores into four Q4 levels, applies CA-based prediction to both nucleotide and
+Q4-quality matrices, and compresses the resulting streams with LPAQ8.
+"""
+
 import argparse
 import os
 import shutil
@@ -21,12 +28,13 @@ from lpaq8 import compress_file, decompress_file
 
 Image.MAX_IMAGE_PIXELS = None
 
-# 映射表
+# Nucleotide byte mapping used before CA residual generation.
 base_to_gray = {'A': 32, 'T': 64, 'G': 192, 'C': 224, 'N': 0}
 gray_to_base = {32: 'A', 64: 'T', 192: 'G', 224: 'C', 0: 'N'}
 
 
 def Q4(qsc):
+    """Map a Phred quality score to one of four lossy Q4 levels."""
     if qsc <= 7:
         return 5
     if qsc <= 13:
@@ -37,14 +45,17 @@ def Q4(qsc):
 
 
 def find_delimiters(identifier):
+    """Extract delimiter characters from a FASTQ identifier."""
     return re.findall(r'[.:_\s=/-]', identifier)
 
 
 def split_identifier(identifier, delimiters):
+    """Split an identifier into token values using the supported delimiters."""
     return re.split(r'[.:_\s=/-]', identifier)
 
 
 def generate_regex(delimiters):
+    """Build an identifier template that can be paired with token values."""
     regex = ""
     count = 1
     for delimiter in delimiters:
@@ -56,6 +67,7 @@ def generate_regex(delimiters):
 
 
 def init_rules_dict():
+    """Initialize the adaptive CA rule table for nucleotide byte values."""
     values = [0, 32, 64, 192, 224]
     combinations = list(product(values, repeat=4))
     rules_dict = defaultdict(int)
@@ -65,6 +77,7 @@ def init_rules_dict():
 
 
 def init_rules_dict_q():
+    """Initialize the adaptive CA rule table for four Q4 quality values."""
     values = [5, 12, 18, 24]
     combinations = list(product(values, repeat=4))
     rules_dict_q = defaultdict(int)
@@ -74,6 +87,7 @@ def init_rules_dict_q():
 
 
 def get_reads_num_per_block(fastq_path, block_size):
+    """Estimate reads per chunk from read length and requested block size."""
     with open(fastq_path, 'r') as file:
         try:
             first_record = next(SeqIO.parse(file, "fastq"))
@@ -91,6 +105,12 @@ def get_reads_num_per_block(fastq_path, block_size):
 # --- Compression Logic ---
 
 def generate_g_prime(G, rules_dict):
+    """Generate a CA residual matrix for mapped nucleotide symbols.
+
+    A correctly predicted cell is stored as marker value 1; otherwise the
+    original mapped nucleotide value is stored. The rule table is updated
+    online and is local to the current chunk.
+    """
     G_prime = np.zeros_like(G)
     rows, cols = G.shape
     for i in range(rows):
@@ -102,12 +122,14 @@ def generate_g_prime(G, rules_dict):
             matched_rule = (up, left_up, left, center)
             candidates = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
             top_rule = max(candidates, key=lambda r: rules_dict[r])
+            # Marker 1 means the adaptive CA rule predicted the cell correctly.
             G_prime[i, j] = 1 if top_rule[3] == center else center
             rules_dict[matched_rule] += 1
     return G_prime
 
 
 def generate_q_prime(Q, rules_dict_q):
+    """Generate a CA residual matrix for Q4-quantized quality scores."""
     Q_prime = np.zeros_like(Q)
     rows, cols = Q.shape
     for i in range(rows):
@@ -119,18 +141,21 @@ def generate_q_prime(Q, rules_dict_q):
             matched_rule = (up, left_up, left, center)
             candidates = [(up, left_up, left, v) for v in [5, 12, 18, 24]]
             top_rule = max(candidates, key=lambda r: rules_dict_q[r])
+            # The lossy quality stream uses the same hit/miss residual marker.
             Q_prime[i, j] = 1 if top_rule[3] == center else center
             rules_dict_q[matched_rule] += 1
     return Q_prime
 
 
 def process_records(records, rules_dict, rules_dict_q):
+    """Convert FASTQ records into ID, nucleotide residual and Q4 streams."""
     id_block, base_image_block, quality_block = [], [], []
     for record in records:
         id_str = record.description
         delimiters = find_delimiters(id_str)
         tokens = split_identifier(id_str, delimiters)
         regex = generate_regex(delimiters)
+        # Store identifier tokens and the delimiter template as separate streams.
         id_block.append((tokens, regex))
         base_gray_values = [base_to_gray.get(base, 0) for base in record.seq]
         base_image_block.append(base_gray_values)
@@ -147,6 +172,7 @@ def process_records(records, rules_dict, rules_dict_q):
 
 
 def save_intermediate_files(g_block, q_block, id_block, output_path, block_count):
+    """Optionally save front-end streams for inspection and debugging."""
     front_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     os.makedirs(front_dir, exist_ok=True)
     g_block.save(os.path.join(front_dir, f'chunk_{block_count}_base.tiff'))
@@ -159,18 +185,21 @@ def save_intermediate_files(g_block, q_block, id_block, output_path, block_count
 
 
 def compress_worker_subprocess(temp_input_path, temp_output_path, lpaq8_path):
+    """Run LPAQ8 on one temporary stream and wait for completion."""
     process = compress_file(temp_input_path, temp_output_path, lpaq8_path)
     if process:
         process.wait()
 
 
 def write_safe_chunk(output_file, tag, data):
+    """Write one archive stream as tag + 8-byte length + payload."""
     output_file.write(tag)
     output_file.write(struct.pack('<Q', len(data)))
     output_file.write(data)
 
 
 def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, save, block_count):
+    """Compress the four lossy streams for one chunk into a part file."""
     part_output_path = os.path.join(os.path.dirname(output_path), f"chunk_{block_count}.part")
     temp_prefix = os.path.join(os.path.dirname(output_path), f"temp_proc_{block_count}")
     temp_input_path, temp_output_path = f"{temp_prefix}_input", f"{temp_prefix}_output"
@@ -241,6 +270,7 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
 
 
 def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq8_path, save):
+    """Parse, transform and compress one temporary FASTQ chunk."""
     records = []
     try:
         gc.collect()
@@ -271,6 +301,7 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
 
 
 def merge_parts(output_path, total_blocks):
+    """Merge chunk part files in order and append the archive EOF marker."""
     missing_parts = []
     tqdm.write(f"info：正在合并 {total_blocks} 个数据块...")
     with open(output_path, "wb") as final_file:
@@ -289,6 +320,7 @@ def merge_parts(output_path, total_blocks):
 
 
 def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, max_workers):
+    """Compress a FASTQ file by dispatching independent chunks to workers."""
     output_path = get_output_path(fastq_path, output_path)
     out_dir = os.path.dirname(output_path)
     if out_dir and not os.path.exists(out_dir):
@@ -314,6 +346,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
                 if read_count_per_block >= reads_per_block:
                     temp_chunk_path = os.path.join(temp_chunk_dir, f"chunk_src_{block_count}.fastq")
                     SeqIO.write(records, temp_chunk_path, "fastq")
+                    # Worker processes operate on chunk files to keep memory use bounded.
                     res = pool.apply_async(process_block_task_from_file,
                                            (temp_chunk_path, block_count, output_path, lpaq8_path, save))
                     results.append(res)
@@ -354,6 +387,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
 # --- Decompression Logic ---
 
 def monitor(process, temp_input_path, temp_output_path):
+    """Wait until an LPAQ8 subprocess has produced its output file."""
     while True:
         if os.path.exists(temp_input_path) and os.path.exists(temp_output_path):
             if process.poll() is not None:
@@ -362,12 +396,14 @@ def monitor(process, temp_input_path, temp_output_path):
 
 
 def decompress_with_monitor(temp_input_path, temp_output_path, lpaq8_path):
+    """Run LPAQ8 decompression for one temporary stream."""
     process = decompress_file(temp_input_path, temp_output_path, lpaq8_path)
     monitor(process, temp_input_path, temp_output_path)
 
 
 def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_data, g_prime_data, quality_data, save,
                              block_count):
+    """Decompress the four streams belonging to one lossy archive chunk."""
     back_compress_dir = os.path.join(os.path.dirname(output_path), "back_compressed")
     front_compress_dir = os.path.join(os.path.dirname(output_path), "front_compressed")
     if save:
@@ -444,6 +480,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
 
 
 def reconstruct_id(tokens, regex):
+    """Rebuild FASTQ identifiers from token streams and templates."""
     reconstructed_ids = []
     for t, r in zip(tokens, regex):
         id_str = r
@@ -455,6 +492,7 @@ def reconstruct_id(tokens, regex):
 
 
 def reconstruct_g_from_g_prime(g_prime_array, rules_dict):
+    """Invert nucleotide CA residuals using the same online rule update order."""
     De_g = np.zeros_like(g_prime_array)
     for i in range(g_prime_array.shape[0]):
         for j in range(g_prime_array.shape[1]):
@@ -464,6 +502,7 @@ def reconstruct_g_from_g_prime(g_prime_array, rules_dict):
             left_up = De_g[i - 1, j - 1] if i != 0 and j != 0 else 0
             matched_rules = [(up, left_up, left, v) for v in [32, 224, 192, 64, 0]]
             top_rule = max(matched_rules, key=lambda rule: rules_dict[rule])
+            # Marker 1 is replaced by the current CA prediction during restore.
             De_g[i, j] = top_rule[3] if g_prime_array[i, j] == 1 else center
             matched_rule = (up, left_up, left, De_g[i, j])
             rules_dict[matched_rule] += 1
@@ -471,6 +510,7 @@ def reconstruct_g_from_g_prime(g_prime_array, rules_dict):
 
 
 def reconstruct_q_from_q_prime(q_prime_array, rules_dict_q):
+    """Invert Q4 quality CA residuals in the lossy decompression path."""
     De_q = np.zeros_like(q_prime_array)
     for i in range(q_prime_array.shape[0]):
         for j in range(q_prime_array.shape[1]):
@@ -480,6 +520,7 @@ def reconstruct_q_from_q_prime(q_prime_array, rules_dict_q):
             left_up = De_q[i - 1, j - 1] if i != 0 and j != 0 else 0
             matched_rules = [(up, left_up, left, v) for v in [5, 12, 18, 24]]
             top_rule = max(matched_rules, key=lambda rule: rules_dict_q[rule])
+            # Marker 1 is restored from the Q4 rule table prediction.
             De_q[i, j] = top_rule[3] if q_prime_array[i, j] == 1 else center
             matched_rule = (up, left_up, left, De_q[i, j])
             rules_dict_q[matched_rule] += 1
@@ -487,6 +528,7 @@ def reconstruct_q_from_q_prime(q_prime_array, rules_dict_q):
 
 
 def reconstruct_base_and_quality(g_prime_img, q_prime_img):
+    """Restore nucleotide strings and Q4 quality values from image streams."""
     bases = []
     qualities = []
     rules_dict = defaultdict(int)
@@ -504,6 +546,7 @@ def reconstruct_base_and_quality(g_prime_img, q_prime_img):
 
 
 def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_block=False):
+    """Append one reconstructed chunk to the output FASTQ file."""
     records = []
     final_fastq_path = output_path if output_path.endswith('.fastq') else os.path.splitext(output_path)[0] + '.fastq'
     id_block = list(id_block)
@@ -522,6 +565,7 @@ def reconstruct_fastq(output_path, id_block, g_prime_img, quality_img, is_first_
 
 
 def read_chunk_safe(mmap_obj, tag):
+    """Read one tagged payload from the archive at the current mmap offset."""
     start_pos = mmap_obj.tell()
     header = mmap_obj.read(len(tag))
     if header != tag:
@@ -537,6 +581,7 @@ def read_chunk_safe(mmap_obj, tag):
 
 
 def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_workers):
+    """Decompress a lossy FastqCA archive while preserving chunk order."""
     output_path = get_output_path(compressed_path, output_path)
     id_regex_tag = b"%id_regex%"
     id_tokens_tag = b"%id_tokens%"
@@ -557,6 +602,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
                 def flush_ready_results():
                     nonlocal next_to_write
+                    # Workers may finish out of order, but FASTQ output must be written in block order.
                     while next_to_write in pending and pending[next_to_write].ready():
                         try:
                             id_block, g_prime, quality = pending[next_to_write].get()
@@ -609,6 +655,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
 
 
 def get_output_path(input_path, output_path):
+    """Resolve an output file path from a file or output directory argument."""
     if input_path is None or not os.path.isfile(input_path):
         exit(1)
     if os.path.isdir(output_path):
@@ -618,6 +665,7 @@ def get_output_path(input_path, output_path):
 
 
 def delete_temp_files(output_path):
+    """Remove temporary files and optional intermediate stream directories."""
     temp_dir = os.path.dirname(output_path)
     for f in os.listdir(temp_dir):
         if f.startswith("temp_proc_") or f.startswith("temp_input") or f.startswith("temp_output") or f.startswith("temp_dec_"):
@@ -635,6 +683,7 @@ def delete_temp_files(output_path):
 
 
 def main():
+    """Standalone CLI for the lossy FastqCA pipeline."""
     lpaq8_path = f"{os.getcwd()}/lpaq8"
     parser = argparse.ArgumentParser(description='fastq lossy compress optimized (multithread)')
     parser.add_argument('--input_path', type=str, required=True, help='input_path')
