@@ -26,6 +26,7 @@ import multiprocessing
 
 from lpaq8 import compress_file, decompress_file
 
+# TIFF streams can be wider or taller than Pillow's default decompression guard.
 Image.MAX_IMAGE_PIXELS = None
 
 # Nucleotide byte mapping used before CA residual generation.
@@ -94,6 +95,7 @@ def get_reads_num_per_block(fastq_path, block_size):
             read_length = len(first_record.seq)
         except StopIteration:
             return 0, 0
+    # Each read contributes one base byte and one quantized-quality byte.
     bytes_per_read = read_length * 2 if read_length else 1
     reads_per_block = block_size // bytes_per_read if block_size else 1
     if reads_per_block <= 0:
@@ -162,8 +164,10 @@ def process_records(records, rules_dict, rules_dict_q):
         quality_gray_values = [Q4(q) for q in record.letter_annotations["phred_quality"]]
         quality_block.append(quality_gray_values)
 
+    # An empty chunk has no matrices to encode.
     if not base_image_block:
         return None, None, None
+    # Both two-dimensional streams use independent adaptive rule tables.
     g_prime = generate_g_prime(np.array(base_image_block, dtype=np.uint8), rules_dict)
     q_prime = generate_q_prime(np.array(quality_block, dtype=np.uint8), rules_dict_q)
     g_prime_img = Image.fromarray(g_prime.astype(np.uint8))
@@ -210,6 +214,7 @@ def back_compress_worker(g_block, q_block, id_block, lpaq8_path, output_path, sa
 
     try:
         with open(part_output_path, "wb") as output_file:
+            # Archive order is fixed: ID template, ID tokens, bases, then qualities.
             # ID Regex
             with open(temp_input_path, "w") as f:
                 for _, regex in id_block:
@@ -279,6 +284,7 @@ def process_block_task_from_file(temp_chunk_path, block_count, output_path, lpaq
         if not records:
             return block_count
 
+        # Adaptive models restart for every independently compressed chunk.
         rules_dict = init_rules_dict()
         rules_dict_q = init_rules_dict_q()
         g_block, q_block, id_block = process_records(records, rules_dict, rules_dict_q)
@@ -305,6 +311,7 @@ def merge_parts(output_path, total_blocks):
     missing_parts = []
     tqdm.write(f"info：正在合并 {total_blocks} 个数据块...")
     with open(output_path, "wb") as final_file:
+        # Worker completion order is irrelevant; filenames restore source order.
         for i in range(1, total_blocks + 1):
             part_path = os.path.join(os.path.dirname(output_path), f"chunk_{i}.part")
             if os.path.exists(part_path):
@@ -350,6 +357,7 @@ def compress_multithread(fastq_path, output_path, lpaq8_path, save, block_size, 
                     res = pool.apply_async(process_block_task_from_file,
                                            (temp_chunk_path, block_count, output_path, lpaq8_path, save))
                     results.append(res)
+                    # Periodically discard completed handles to bound coordinator memory.
                     if len(results) > max_workers * 2:
                         results = [r for r in results if not r.ready()]
                         if len(results) > max_workers * 3:
@@ -435,6 +443,7 @@ def process_compressed_block(output_path, lpaq8_path, id_regex_data, id_tokens_d
             shutil.copy(temp_input_path, os.path.join(back_compress_dir, f"chunk_{block_count}_id_tokens.lpaq8"))
             shutil.copy(temp_output_path, os.path.join(front_compress_dir, f"chunk_{block_count}_id_tokens.txt"))
 
+        # Pair each token line with the identifier template on the same record.
         id_block = zip(id_tokens, id_regex)
 
         # Quality
@@ -485,6 +494,7 @@ def reconstruct_id(tokens, regex):
     for t, r in zip(tokens, regex):
         id_str = r
         token_list = t.split()
+        # Templates contain one-based placeholders such as {{T1}} and {{T2}}.
         for i, token in enumerate(token_list):
             id_str = id_str.replace(f"{{{{T{i+1}}}}}", token)
         reconstructed_ids.append(id_str)
@@ -573,6 +583,7 @@ def read_chunk_safe(mmap_obj, tag):
     size_bytes = mmap_obj.read(8)
     if len(size_bytes) < 8:
         raise RuntimeError("解压时无法读取长度字段，压缩文件可能已损坏")
+    # Payload lengths are unsigned 64-bit little-endian values.
     size = struct.unpack('<Q', size_bytes)[0]
     data = mmap_obj.read(size)
     if len(data) != size:
@@ -583,6 +594,7 @@ def read_chunk_safe(mmap_obj, tag):
 def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_workers):
     """Decompress a lossy FastqCA archive while preserving chunk order."""
     output_path = get_output_path(compressed_path, output_path)
+    # Every archive block repeats these four tagged streams in this exact order.
     id_regex_tag = b"%id_regex%"
     id_tokens_tag = b"%id_tokens%"
     base_tag = b"%base_g_prime%"
@@ -616,6 +628,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                         next_to_write += 1
 
                 while True:
+                    # A valid archive ends with the four-byte EOF marker and no length field.
                     remaining = mm.size() - mm.tell()
                     if remaining == len(eof_tag):
                         tail = mm.read(len(eof_tag))
@@ -635,6 +648,7 @@ def decompress(compressed_path, output_path, lpaq8_path, save, gr_progress, max_
                     )
                     block_count += 1
 
+                    # Apply light backpressure when workers lag behind archive parsing.
                     if len(pending) > max_workers * 3:
                         time.sleep(0.1)
                     flush_ready_results()
@@ -693,6 +707,7 @@ def main():
     parser.add_argument('--threads', type=int, default=os.cpu_count(), help='number of worker threads')
     parser.add_argument('--block_size', type=int, default=128 * 1024 * 1024, help='block size in bytes')
     args = parser.parse_args()
+    # argparse receives the flag as text to preserve the existing CLI contract.
     save_flag = args.save.lower() == 'true'
 
     if args.mode in ['compress', 'c']:
